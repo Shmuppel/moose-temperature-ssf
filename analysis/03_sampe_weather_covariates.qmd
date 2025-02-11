@@ -1,0 +1,175 @@
+from datetime import datetime
+import pandas as pd
+import matplotlib.pyplot as plt
+import geopandas as gpd
+from sklearn.linear_model import LinearRegression
+import sklearn.metrics
+import rioxarray as rxr
+
+from sqlalchemy.orm import Session
+from stif import Data
+from stif import Predictor
+from sklearn.cluster import DBSCAN
+import numpy as np 
+
+from database.animal.models import Localisation
+from database.base import get_engine
+from database.weather.functions import get_weather_data
+
+class ShuffledKFold(sklearn.model_selection.KFold):
+  def __init__(self, n_splits):
+    super().__init__(n_splits, shuffle=True)
+
+def cross_validate(predictor, kriging_params, variogram_params):
+  # Create kriging cross validation
+  predictor.calc_cross_validation(
+    kriging=True,
+    verbose=True,
+    geostat_params={
+      "variogram_params": variogram_params,
+      "kriging_params": kriging_params,
+    },
+      cv_split=ShuffledKFold
+  )
+  predictor.plot_cross_validation_residuals()
+  print(predictor.get_cross_val_metric(sklearn.metrics.mean_absolute_error))
+
+def remove_clustered_space_time_coords(gdf):
+  # Convert timestamps to a numerical scale
+  gdf['timestamp_numeric'] = gdf['date'].astype(int) / 1e9  # Convert to seconds
+  # Combine spatial and temporal features
+  coords_time = np.column_stack((gdf.geometry.x, gdf.geometry.y, gdf['timestamp_numeric']))
+  # Fit DBSCAN (adjust eps values for space/time)
+  clustering = DBSCAN(eps=100, min_samples=2, metric='euclidean').fit(coords_time)
+  gdf = gdf[clustering.labels_ == -1]
+  gdf = gdf.drop(columns=["timestamp_numeric"])
+  return gdf
+
+def get_seasonal_weather_data(session, season="summer", year=2023):
+  start_date = datetime.fromisoformat("2006-06-01 00:00:00Z")
+  end_date = datetime.fromisoformat("2006-08-31 00:00:00Z")
+  df = get_weather_data(session, [start_date, end_date], "air_temperature")
+  df = df.drop_duplicates(subset=["x", "y", "date"])
+
+  gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df['x'], df['y']))
+  gdf.set_crs(epsg=3006, inplace=True)
+  
+  gdf = gdf[gdf['elevation'] != 0]
+  gdf["elevation"] = gdf["elevation"].astype(int)
+
+  gdf["month"] = gdf["date"].dt.month
+
+  gdf["hour"] = gdf["date"]
+  gdf["hour"] -= gdf["hour"].min()
+  gdf["hour"] = gdf["hour"].dt.total_seconds() / 3600
+  gdf["hour"] = gdf["hour"].astype(int)
+  gdf = gdf.sort_values(by=['hour'])
+  
+  return gdf
+
+
+def annotate_kriged_weather(engine):
+  with Session(engine) as session:
+    localisations = Localisation.query.all()
+    breakpoint()
+
+def get_kriging_data(engine, show_plots=True, cross_validate=False):
+  with Session(engine) as session:
+    gdf = get_seasonal_weather_data(session)
+    gdf = remove_clustered_space_time_coords(gdf)
+
+    # gdf = pd.get_dummies(gdf, drop_first=True) # for landuse classes
+    covariate_colnames = [col for col in list(gdf.columns.values) if col not in ("geometry", "hour", "date", "value", "landuse")]
+    data = Data(
+      gdf,
+      space_cols=["x", "y"],
+      time_col="hour",
+      predictand_col="value",
+      covariate_cols=covariate_colnames,
+    )
+
+    # Create Linear Regression Model
+    covariate_model = LinearRegression()
+    predictor = Predictor(data, covariate_model)
+
+    predictor.calc_cross_validation(cv_split=ShuffledKFold)
+    score = predictor.get_cross_val_metric(sklearn.metrics.explained_variance_score)
+    print("Explained variance by linear regression model: ", score)
+
+    if show_plots:
+      predictor.plot_cross_validation_residuals()
+
+    # Create space-time variogram
+    variogram_params = {
+      "space_dist_max": 8e5,
+      "time_dist_max": 10,
+      "el_max": 1e8
+    } 
+    predictor.calc_empirical_variogram(**variogram_params)
+
+    if show_plots:
+      predictor.plot_empirical_variogram()
+      predictor.plot_variogram_model_comparison()
+    
+    # FULL FITTING OF MODEL
+    kriging_params = {
+      "min_kriging_points": 1,
+      "max_kriging_points": 10,
+      "space_dist_max": 3e5,
+      "time_dist_max": 3
+    }
+    if cross_validate:
+      cross_validate(predictor, kriging_params, variogram_params)
+
+    # PREDICT
+    predictor.fit_variogram_model(st_model='sum_metric')
+
+    dem = rxr.open_rasterio("data/geography/elevation/elevation.tif")
+    dem = dem.sel(band=1).where(dem != 0)
+    dem.name = "elevation"
+    dem_coarse = dem.coarsen(x=100, y=100, boundary="trim").mean(skipna=True)
+    pred_grid = dem_coarse.to_dataframe().reset_index()[["x", "y", "elevation"]]
+
+    prediction_df = pd.DataFrame({"x": pred_grid["x"], "y": pred_grid["y"], "elevation": pred_grid["elevation"], "hour": 800})
+    prediction_df = prediction_df.dropna()
+    prediction_df["elevation"] = prediction_df["elevation"].astype(int)
+
+    prediction_gdf = gpd.GeoDataFrame(
+      prediction_df,
+      geometry=gpd.points_from_xy(prediction_df['x'], prediction_df['y'])
+    )
+
+    prediction_gdf.set_crs(epsg=3006, inplace=True)
+
+    # PREDICT KRIGING
+    res_mean, res_std = predictor.predict(prediction_gdf, kriging_params)
+    prediction_gdf["prediction_mean"] = res_mean
+    prediction_gdf["prediction_std"] = res_std
+
+    fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+    ax = axs[0]
+    prediction_gdf.plot(column="prediction_mean", cmap="viridis", legend=True, ax=ax, markersize=9, marker="s")
+    ax.set_title("Prediction mean")
+    ax.set_xlabel("longitude")
+    ax.set_ylabel("latitude")
+
+    ax = axs[1]
+    prediction_gdf.plot(column="prediction_std", cmap="magma", legend=True, ax=ax, markersize=9, marker="s")
+    ax.set_title("Prediction standard deviation")
+    ax.set_xlabel("longitude")
+    ax.set_ylabel("latitude")
+    fig.tight_layout()
+    breakpoint()
+    pass
+
+
+
+
+def annotate_amt_steps():
+  engine = get_engine()
+  with Session(engine) as session:
+    gdf = get_seasonal_weather_data(session)
+    print(gdf)
+  engine.dispose()
+    
+

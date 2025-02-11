@@ -1,0 +1,311 @@
+---
+title: "step_generation"
+format: html
+editor: visual
+---
+
+# 1 - Preprocess moose localisations
+
+```{r}
+#| label: packages
+#| code-summary: "Loading packages"
+#| message: false
+#| warning: false
+
+library(tidyverse)
+packages <- c("amt", "lubridate", "tictoc", "sf", "ggspatial")
+walk(packages, require, character.only = T)
+```
+
+```{r}
+moose <- read.csv('../data/localisations/moose.csv', sep=';')
+```
+
+## 1.1 Prepare data
+
+```{r, echo:false}
+columns_of_interest <- c(
+  "Object_ID" = "animal_id",
+  "Collar_ID" = "collar_id",
+  "LMT_date" = "date",
+  "Longitude" = "x",
+  "Latitude" = "y",
+  "Temp" = "collar_temperature",
+  "Sex" = "sex",
+  "YrBirth" = "birth_year"
+)
+
+moose <- moose %>%
+  rename_with(~ unlist(columns_of_interest), all_of(names(columns_of_interest))) %>%
+  select(all_of(unname(columns_of_interest))) %>%
+  group_by(animal_id) %>%
+  arrange(date, .by_group=T) %>%  # Within each animal_id, sort by timestamps
+  distinct(date, .keep_all = T) %>%  # Remove duplicate timestamps for animals
+  arrange(animal_id) %>% # Sort by animal_id
+  mutate(date = force_tz(ymd_hms(date), tzone="Europe/Stockholm")) %>%
+  ungroup()
+```
+
+## 1.2 Spatial Join Strata
+
+Four strata are created to differentiate ecotypes and moose populations. The strata variable contains the strata as multipolygons, We can then check to see if and which polygon a localisation lies inside of, and associate the localisation with that strata.
+
+```{r}
+strata <-  st_read('../data/strata/strata.gpkg') # already in 3006
+strata <- st_transform(strata, crs=st_crs(4326))
+moose <- st_as_sf(moose, coords = c("x", "y"), crs = st_crs(4326), remove=F)
+```
+
+```{r}
+moose <- moose %>% 
+  st_join(strata) %>%
+  mutate(strata = name) %>%
+  select(-name, -path)
+```
+
+## 1.3 Filter data
+
+### 1.3.1 Remove data outside of strata
+
+```{r}
+print(sum(is.na(moose$strata)))
+moose <- moose[!is.na(moose$strata),]  # remove localisations outside of the stratas
+moose <- st_drop_geometry(moose)  # back to normal data frame
+```
+
+### 1.3.2 Remove males
+
+For this analysis we'll only include females, as they are the most commonly tracked during these studies.
+
+```{r}
+moose <- moose %>% filter(sex == "F")
+```
+
+### 1.3.2 Season Fix Coverage
+
+Next we want to filter moose localisations based on the temporal coverage of their localisations.
+
+```{r}
+threshold = 0.7 # at least 70% of fixes required in a season
+```
+
+```{r}
+# Add some season data
+moose <- moose %>% mutate(
+  year = year(date),
+  season = case_when(
+      month(date) %in% c(12, 1, 2, 3) ~ "winter",
+      month(date) %in% c(6, 7, 8) ~ "summer",
+      TRUE ~ NA_character_ # Exclude other months
+    ),
+  # Adjust year for winter spanning two years, just use the next year
+  season_year = if_else(month(date) == 12, year(date) + 1, year(date))
+  ) %>%
+  filter(!is.na(season))
+
+seasonal_coverage <- moose %>%
+  group_by(animal_id, season_year, season) %>%
+  summarise(
+    actual_fixes = n(),
+    .groups='keep'
+  ) %>%
+  mutate(
+    expected_fixes = case_when(
+      # divide total hours in season by fix interval
+      season == "winter" ~ (4 * 30 * 24) / 3,  # Approx. 4 months * 30 days * 24 hours 
+      season == "summer" ~ (3 * 30 * 24) / 3   # Approx. 3 months * 30 days * 24 hours
+    ),
+    coverage = actual_fixes / expected_fixes,
+  )
+```
+
+```{r}
+ggplot(seasonal_coverage, aes(x=coverage)) +
+  geom_histogram(aes(fill = ..count..)) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(
+    title = "Histogram of Seasonal Coverage", 
+    x = "Percent of Fixes vs Theoretical Maximum", 
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+seasonal_coverage <- seasonal_coverage %>% filter(coverage >= threshold)
+moose <- moose %>% filter(animal_id %in% seasonal_coverage$animal_id)
+```
+
+### 1.3.3 Strata Coverage
+
+We'll only include the localisations of moose that mostly stick to the strata in a season. For example, occasionally there is a moose that spends 50% of its time in one strata and 50% in another (although quite rare as we see in a bit). This would cause a small / unrepresentative number of localisations for an individual in a strata, therefore we remove them.
+
+```{r}
+threshold = 0.7 # at least 70% of fixes required to be in the dominant strata in a season
+```
+
+```{r}
+strata_coverage <- moose %>%
+  # First get the amount of fixes for each unique season and strata
+  group_by(animal_id, season_year, season, strata) %>%
+  summarise(strata_fixes = n(), .groups = "drop") %>%
+  group_by(animal_id, season_year, season) %>%
+  # Then see what proportion of the season's fixes were in each strata
+  mutate(
+    total_fixes = sum(strata_fixes),
+    strata_percentage = strata_fixes / total_fixes
+  )
+```
+
+```{r}
+ggplot(moose_strata_distribution, aes(x=strata_percentage)) +
+  geom_histogram(aes(fill = ..count..)) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(title = "Histogram of Strata Percentage", x = "Strata Percentage", y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+# Filter animals where the dominant strata has at least 70% of localizations
+strata_coverage <- strata_coverage %>%
+  filter(strata_percentage >= threshold)
+
+# Keep only localizations within the dominant strata
+moose <- moose %>%
+  inner_join(
+    strata_coverage %>% select(animal_id, season_year, season, strata),
+    by = c("animal_id", "season_year", "season", "strata")
+  )
+```
+
+# 2 - Create tracks and (random) steps
+
+## 2.1 Create tracks and bursts
+
+Now we create the tracks using the `amt` package.
+
+```{r}
+moose_tracks <- moose %>% mk_track(id = animal_id,
+                                   .x=x,
+                                   .y=y, 
+                                   .t=date, 
+                                   all_cols = T,
+                                   crs = 4326) %>%
+  transform_coords(crs_to = 3006, crs_from = 4326)
+```
+
+```{r}
+# plot the data, spatially colored by year
+moose_sf <- st_as_sf(moose_tracks, coords=c("x_", "y_"), crs=st_crs(3006))
+ggplot() +
+  layer_spatial(moose_sf, aes(color=as.factor(year))) +
+  layer_spatial(strata, fill="transparent", color="black") +
+  scale_color_viridis_d(name="Year", option = "plasma") +
+  theme_minimal()
+```
+
+```{r}
+# nest the data by individual
+moose_steps <- moose_tracks %>% arrange(animal_id) %>% nest(data = -"animal_id")
+
+moose_steps_by_burst <- moose_steps %>%
+  mutate(steps = map(data, function(x)
+    x %>% track_resample(rate = hours(3), tolerance = minutes(10)) %>%
+      # to filter out bursts with less than 3 locations
+      amt::filter_min_n_burst(min_n = 3) %>% 
+      steps_by_burst(keep_cols='start')))
+
+# unnest the data after creating 'steps' objects
+moose_steps_by_burst <- moose_steps_by_burst %>% 
+  amt::select(animal_id, steps) %>% 
+  amt::unnest(cols = steps)
+
+moose_steps_by_burst <- moose_steps_by_burst %>% 
+  mutate(t2_rounded = round_date(t2_, "hour"), # round the time to the nearest hour
+         hour_t2 = ifelse(hour(t2_rounded) == 0, 24, hour(t2_rounded))) # change the 0 hour to 24
+
+head(moose_steps_by_burst, 10)
+```
+
+## 2.2 Fit step-length and turning-angle distributions for each strata
+
+```{r}
+moose_steps_by_burst <- moose_steps_by_burst %>% 
+  mutate(sl_ = if_else(sl_ < 0.1, 0.1, sl_))
+```
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(tictoc)
+
+# Fit distributions for each strata
+dist_params <- moose_steps_by_burst %>%
+  group_by(strata) %>%
+  summarise(
+    gamma_shape = fit_distr(sl_, "gamma")$params$shape,
+    gamma_scale = fit_distr(sl_, "gamma")$params$scale,
+    vonmises_kappa = fit_distr(ta_, "vonmises")$params$kappa,
+    vonmises_mu = fit_distr(ta_, "vonmises")$params$mu,
+    .groups = "drop"
+  )
+
+# Display table of parameters
+print(dist_params)
+```
+
+## 2.3 Generate random steps for each strata (population)
+
+```{r}
+moose_random_steps <- moose_steps_by_burst %>%
+  group_split(strata) %>%
+   map_dfr(~ {
+    # Fit distributions for this subset
+    gamma_dist <- fit_distr(.x$sl_, "gamma")
+    vonmises_dist <- fit_distr(.x$ta_, "vonmises")
+    class(.x) <- class(moose_steps_by_burst)
+    # Generate random steps
+    .x %>%
+      random_steps(n_control = 10,
+                   sl_distr = gamma_dist,
+                   ta_distr = vonmises_dist) %>%
+      mutate(y = as.numeric(case_))
+  })
+
+print(moose_random_steps)
+```
+
+```{r}
+moose_random_steps_sf <- st_as_sf(
+  moose_random_steps, 
+  coords=c("x1_", "y1_"), 
+  crs=st_crs(3006)
+)
+ggplot() +
+  layer_spatial(moose_random_steps_sf, aes(color=as.factor(year))) +
+  layer_spatial(strata, fill="transparent", color="black") +
+  scale_color_viridis_d(name="Year", option = "plasma") +
+  theme_minimal()
+```
+
+## 2.4 Plot step length and turning angle distributions
+
+### 2.4.1 Step length (negative gamma) distribution for each strata
+
+```{r}
+```
+
+```{r}
+```
+
+### 2.4.1 Turning angle (von Mises) distribution for each strata
+
+```{r}
+```
+
+# 3 Export results
+
+```{r}
+write.csv(moose_random_steps, '../data/localisations/moose_random_steps.csv')
+```
