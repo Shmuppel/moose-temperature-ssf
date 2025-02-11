@@ -11,8 +11,8 @@ from sqlalchemy import insert, select
 import sqlalchemy.orm as orm
 
 # Local imports
-from database.util.multiprocessing import BaseWorker, BaseManager
-from database.weather.models import WeatherData, WeatherStation
+from util.multiprocessing import BaseWorker, BaseManager
+from models import WeatherData, WeatherStation
 
 
 class CachedLimiterSession(CacheMixin, LimiterMixin, Session):
@@ -30,7 +30,7 @@ class WeatherDataWorker(BaseWorker):
         super().__init__(*args)
     
     def run(self):
-        self.smhi_cache = CachedLimiterSession('database/weather/cache', per_second=2)
+        self.smhi_cache = CachedLimiterSession('cache', per_second=2)
         super().run()
 
     def process_job(self, station_id: int) -> None:

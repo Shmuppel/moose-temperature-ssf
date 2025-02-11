@@ -1,10 +1,7 @@
-import multiprocessing as mp
-from multiprocessing.shared_memory import SharedMemory
 import os
-import pickle
+import multiprocessing as mp
 from alive_progress import alive_bar
-from database.base import get_engine
-
+from conn import get_engine
 
 class BaseWorker(mp.Process):
     """
@@ -102,39 +99,3 @@ class BaseManager:
 
         # Stop workers
         self.stop_workers()
-
-
-def serialize_to_shared_memory(data, shm_name=None):
-    """
-    Serialize data to shared memory and return the SharedMemory object and name.
-    
-    Args:
-        data: The data to serialize (e.g., Pandas DataFrame, tuple of NumPy arrays).
-        shm_name: Optional shared memory name (default: None).
-    
-    Returns:
-        Tuple of (SharedMemory object, shared memory name).
-    """
-    data_bytes = pickle.dumps(data)  # Serialize data
-    shm = SharedMemory(create=True, size=len(data_bytes), name=shm_name)
-    shm.buf[:len(data_bytes)] = data_bytes  # Copy serialized data to shared memory
-    return shm, shm.name
-
-
-def deserialize_from_shared_memory(shm_name):
-    """
-    Deserialize data from shared memory.
-    
-    Args:
-        shm_name: The name of the shared memory segment to read from.
-    
-    Returns:
-        The deserialized data.
-    """
-    shm = SharedMemory(name=shm_name)
-    try:
-        data_bytes = bytes(shm.buf[:])  # Read data from shared memory
-        data = pickle.loads(data_bytes)  # Deserialize data
-    finally:
-        shm.close()  # Detach from shared memory
-    return data

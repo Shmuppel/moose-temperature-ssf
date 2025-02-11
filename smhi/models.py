@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import List
 from sqlalchemy import String, DateTime, Float, ForeignKey, Integer, Boolean
-from sqlalchemy.orm import relationship, Mapped, mapped_column
-from geoalchemy2 import Geometry, Raster, WKBElement
+from sqlalchemy.orm import Mapped, relationship, mapped_column
+from geoalchemy2 import Geometry, WKBElement
+from sqlalchemy.ext.declarative import declarative_base
 
-from database.base import Base
+Base = declarative_base()
 
 class WeatherStation(Base):
     __tablename__ = 'weather_station'
@@ -25,7 +26,6 @@ class WeatherStation(Base):
 
     # Covariates
     height: Mapped[Float] = mapped_column(Float)
-    landuse: Mapped[String] = mapped_column(String, nullable=True)
 
     geom: Mapped[WKBElement] = mapped_column(Geometry("Point", srid=3006, spatial_index=True), nullable=True)
 
