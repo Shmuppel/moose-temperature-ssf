@@ -96,5 +96,5 @@ class WeatherDataManager(BaseManager):
 
 def seed_weather_data(engine) -> None:
     """Run the full seeding process for weather stations and data."""
-    manager = WeatherDataManager(engine, num_workers=20, title="Seeding Weather Data")
+    manager = WeatherDataManager(engine, title="Seeding Weather Data")
     manager.run(WeatherDataWorker)

@@ -9,4 +9,4 @@ Install PostgreSQL and make sure to enable the PostGIS extension by running the 
 
 `CREATE EXTENSION postgis`
 
-The database can then be seeded with weather data by running `python3 smhi/main.py`. If you want to download additional weather covariates, the mapping can be found in `smhi/seed/station` under `PARAMETERS`.
+The database can then be seeded with weather data by running `python3 smhi/main.py`, this should take a while. If you want to download additional weather covariates, the mapping can be found in `smhi/seed/station` under `PARAMETERS`.
