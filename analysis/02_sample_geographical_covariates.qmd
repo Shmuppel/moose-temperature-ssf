@@ -67,6 +67,8 @@ for (f in covariate_files) {
 }
 ```
 
+We create a generic wrapper function that makes it easier to extract covariates with settings that are of interest to us. We extract covariates at both the start and end of the step.
+
 ```{r}
 sample_covariate <- function(steps_df, covariate_name) {
   tic()
@@ -81,110 +83,81 @@ sample_covariate <- function(steps_df, covariate_name) {
 }
 ```
 
-## 2. Sampling Terrain and Forest Covariates
+## 2. Sample Landuse Covariates
 
 ```{r}
 for (covariate in names(covariates)) {
-  if (startsWith(covariate, "landuse")) next
-  moose_random_steps <- sample_covariate(moose_random_steps, covariate)
+  if (!startsWith(covariate, "landuse")) next
+  
+  # Extract the year and determine the range
+  covariate_year <- as.integer(sub(".*_(\\d{4}).*", "\\1", covariate))
+  # We use the 2003 map for dates from 2003-2017 and the 2018 for newer dates
+  covariate_year_range <- if (covariate_year == 2003) 2003:2017 else 2018:2024
+  
+  # Sample the landuse covariate (easier to just sample all the points)
+  annotated_random_steps <- sample_covariate(moose_random_steps, covariate)
+  
+  # Logical mask for filtering rows within the year range
+  mask <- year(moose_random_steps$t1_) %in% covariate_year_range
+  
+  # Assign values only to the filtered rows
+  moose_random_steps[mask, c("landuse_start", "landuse_end")] <- 
+    annotated_random_steps[mask, c("landuse_start", "landuse_end")]
 }
 ```
 
-## 3. Sampling Landuse Covariates
+We remove strata where the true step / location could not be matched with a landuse, these are unfortunately outside the extent of our analysis.
 
 ```{r}
-moose_random_steps_new <- moose_random_steps %>% filter(year(t1_) >= 2018)
-moose_random_steps_old <- moose_random_steps %>% filter(year(t1_) < 2018)
+n_before <- nrow(moose_random_steps)
+moose_random_steps <- remove_incomplete_strata(moose_random_steps, col = "landuse_start")
+n_after <- nrow(moose_random_steps)
+n_removed <- n_before - n_after
 
-moose_random_steps_new <- sample_covariate(moose_random_steps_new, "landuse_2018")
-moose_random_steps_old <- sample_covariate(moose_random_steps_old, "landuse_2003-2017")
-
-moose_random_steps <- bind_rows(moose_random_steps_old, moose_random_steps_new)
+print(glue(
+  "Removed {n_removed} rows with incomplete strata in 'landuse_start'. ",
+  "{n_after} rows remain."
+))
 ```
 
-### 3.2 Update Landuse Covariates with Felling data
+### 2.2 Update landuse covariates with Felling data
 
 ```{r}
-felling_2003_2018 <- st_read('../data/geographical_covariates/felling_2003-2018.gpkg')
-felling_2019_2024 <- st_read(
-  '../data/geographical_covariates/felling_2019-2024.gpkg', 
-  layer="single_parts"
-)
-
-felling_2003_2018 <- felling_2003_2018 %>% rename(felling_year = year)
-felling_2019_2024 <- felling_2019_2024 %>% rename(felling_year = ArendeAr)
-```
-
-```{r}
-process_felling <- function(data, felling_data, time_col, landuse_col) {
-  data %>%
-    st_join(felling_data, left = TRUE) %>%
-    mutate(
-      !!sym(landuse_col) := if_else(
-        !is.na(felling_year) & (year(!!sym(time_col)) > felling_year), 
-        3, 
-        !!sym(landuse_col)
-      )
-    ) %>%
-    select(names(moose_random_steps))
+for (covariate in names(covariates)) {
+  if (!startsWith(covariate, "felling")) next
+  
+  # Extract the year and determine the range
+  covariate_year <- as.integer(sub(".*(\\d{4}).*", "\\1", covariate))
+  covariate_year_range <- if (covariate_year == 2018) 2003:2018 else 2019:2024
+  
+  # Define column names
+  annotated_colnames <- sprintf("%s_%s", covariate, c("start", "end"))
+  annotated_random_steps <- sample_covariate(moose_random_steps, covariate)
+  
+  # Compute differences between localisation year and felling year, if both are available
+  diff_start <- year(moose_random_steps$t1_) - annotated_random_steps[[annotated_colnames[1]]]
+  diff_end <- year(moose_random_steps$t2_) - annotated_random_steps[[annotated_colnames[2]]]
+  
+  # Apply conditions: check non-NA values & ensure difference is in (0,10]
+  # Difference > 0 means the localisation took place after felling
+  # Difference > 10 means 10 years have passed since felling and we'll no longer consider it a clear-cut forest
+  mask_start <- !is.na(diff_start) & !is.na(moose_random_steps$landuse_start) & diff_start > 0 & diff_start <= 10
+  mask_end <- !is.na(diff_end) & !is.na(moose_random_steps$landuse_end) & diff_end > 0 & diff_end <= 10
+  
+  moose_random_steps[mask_start, "landuse_start"] <- 3
+  moose_random_steps[mask_end, "landuse_end"] <- 3
+  
+  n_start_updated <- sum(mask_start, na.rm = TRUE)
+  n_end_updated <- sum(mask_end, na.rm = TRUE)
+  
+  print(glue(
+    "{covariate}: Updated {n_start_updated} rows for 'landuse_start' and {n_end_updated} rows for 'landuse_end' ",
+    "due to felling before localization."
+  ))
 }
 ```
 
-```{r}
-moose_random_steps_start <- st_as_sf(
-  moose_random_steps, 
-  coords = c('x1_', 'y1_'), 
-  crs = 3006, 
-  remove = FALSE
-)
-
-moose_random_steps_new <- process_felling(
-  filter(moose_random_steps_start, year(t1_) > 2019), 
-  felling_2019_2024, 
-  time_col="t1_",
-  landuse_col="landuse_start"
-)
-
-moose_random_steps_old <- process_felling(
-  filter(moose_random_steps_start, year(t1_) <= 2019), 
-  felling_2003_2018, 
-  time_col="t1_",
-  landuse_col="landuse_start"
-)
-
-moose_random_steps <- bind_rows(moose_random_steps_new, moose_random_steps_old) 
-moose_random_steps <- st_drop_geometry(moose_random_steps)
-```
-
-Repeat for end steps
-
-```{r}
-moose_random_steps_end <- st_as_sf(
-  moose_random_steps, 
-  coords = c('x2_', 'y2_'), 
-  crs = 3006, 
-  remove = FALSE
-)
-
-moose_random_steps_new <- process_felling(
-  filter(moose_random_steps_end, year(t2_) > 2019), 
-  felling_2019_2024, 
-  time_col="t2_",
-  landuse_col="landuse_end"
-)
-
-moose_random_steps_old <- process_felling(
-  filter(moose_random_steps_end, year(t2_) <= 2019), 
-  felling_2003_2018, 
-  time_col="t2_",
-  landuse_col="landuse_end"
-)
-
-moose_random_steps <- bind_rows(moose_random_steps_new, moose_random_steps_old)
-moose_random_steps <- st_drop_geometry(moose_random_steps)
-```
-
-### 3.3 Recode Landuse Integers to Labels
+### 2.3 Recode landuse numbers to labels
 
 ```{r}
 landuse_classes <- c(
@@ -198,17 +171,56 @@ landuse_classes <- c(
   "Low mountain forest"
 )
 landuse_classes <- setNames(landuse_classes, 1:8)
+
+moose_random_steps$landuse_start <- recode(moose_random_steps$landuse_start, !!!landuse_classes)
+moose_random_steps$landuse_end <- recode(moose_random_steps$landuse_end, !!!landuse_classes)
 ```
 
+## 3. Sample SLU Forest Covariates
+
 ```{r}
-moose_random_steps$landuse_start <- recode(
-  moose_random_steps$landuse_start, 
-  !!!landuse_classes)
-moose_random_steps$landuse_end <- recode(
-  moose_random_steps$landuse_end, 
-  !!!landuse_classes
-)
+for (covariate in names(covariates)) {
+  if (!startsWith(covariate, "slu")) next
+  
+  # Extract year and determine applicable range
+  covariate_year <- as.integer(sub(".*_(\\d{4})_.*", "\\1", covariate))
+  # We use the 2005 map for the dates from 2003-2009, and the 2010 map for newer dates
+  covariate_year_range <- if (covariate_year == 2005) 2003:2009 else 2010:2024
+  
+  # Extract base covariate name
+  covariate_base <- sub("slu_\\d{4}_", "", covariate)
+  covariate_base_desired <- sub("_(\\d{4})_", "_", covariate)
+  
+  # Generate column names
+  annotated_colnames <- sprintf("%s_%s", covariate_base, c("start", "end"))
+  desired_colnames <- sprintf("%s_%s", covariate_base_desired, c("start", "end"))
+  
+  # Sample covariates
+  annotated_random_steps <- sample_covariate(moose_random_steps, covariate)
+  
+  # Logical mask for filtering rows within the year range
+  mask <- year(moose_random_steps$t1_) %in% covariate_year_range
+  
+  # Assign values only to the filtered rows
+  moose_random_steps[mask, desired_colnames] <- 
+    annotated_random_steps[mask, annotated_colnames]
+}
 ```
+
+## 4. Sampling General Terrain Covariates
+
+```{r}
+for (covariate in names(covariates)) {
+  if (
+    startsWith(covariate, "landuse") | 
+    startsWith(covariate, "slu") | 
+    startsWith(covariate, "felling")
+  ) next
+  moose_random_steps <- sample_covariate(moose_random_steps, covariate)
+}
+```
+
+## 5. Export annotated localisations to CSV
 
 ```{r}
 write.csv(moose_random_steps, '../data/localisations/moose_random_steps.csv')
