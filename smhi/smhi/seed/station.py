@@ -1,4 +1,6 @@
 # Standard library imports
+import json
+import os
 from typing import List, Dict
 
 # Third-party imports
@@ -10,8 +12,8 @@ from requests_ratelimiter import LimiterMixin
 from pyproj import Transformer
 
 # Local imports
-from util.time import get_millisecond_datetime
-from models import WeatherStation
+from smhi.util.time import get_millisecond_datetime
+from smhi.models import WeatherStation
 
 
 class CachedLimiterSession(CacheMixin, LimiterMixin, Session):
@@ -30,7 +32,7 @@ SESSION = CachedLimiterSession(
 # Constants for API endpoint and weather parameters
 # Add or remove parameters here in order to use them (https://opendata.smhi.se/apidocs/metobs/parameter.html)
 ENTRY_POINT = "https://opendata-download-metobs.smhi.se/api/version/1.0"
-PARAMETERS = {
+PARAMETER_MAPPING = {
     "air_temperature": 1,
     "wind": 4,
     "precipitation": 7,
@@ -92,8 +94,8 @@ def fetch_weather_stations() -> List[WeatherStation]:
     stations_per_parameter = {}
     n_stations = 0
 
-    for parameter in PARAMETERS.keys():
-        response = SESSION.get(f"{ENTRY_POINT}/parameter/{PARAMETERS[parameter]}.json").json()
+    for parameter in json.loads(os.getenv('PARAMETERS')):
+        response = SESSION.get(f"{ENTRY_POINT}/parameter/{PARAMETER_MAPPING[parameter]}.json").json()
         stations_per_parameter[parameter] = response
         n_stations += len(response["station"])
 

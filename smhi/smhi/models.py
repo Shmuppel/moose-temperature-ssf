@@ -38,7 +38,8 @@ class WeatherData(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     weather_station: Mapped["WeatherStation"] = relationship(back_populates="data")
     weather_station_id: Mapped[int] = mapped_column(ForeignKey("weather_station.id"), index=True)
-    date: Mapped[datetime] = mapped_column(DateTime(), index=True)
+    date: Mapped[datetime] = mapped_column(DateTime())
+    date_local: Mapped[datetime] = mapped_column(DateTime(), index=True)
     parameter: Mapped[str] = mapped_column(String(30), index=True) # air_temperature, wind, precipitation
     value: Mapped[float] = mapped_column(Float) # air_temperature, wind, precipitation
     quality: Mapped[str] = mapped_column(String(3))

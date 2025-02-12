@@ -1,0 +1,215 @@
+---
+title: "sample_geographical_covariates"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: packages
+#| code-summary: "Loading packages"
+#| message: false
+#| warning: false
+
+library(tidyverse)
+packages <- c("amt", "lubridate", "sf", "terra", "glue", "tictoc")
+walk(packages, require, character.only = T)
+```
+
+```{r}
+load('../data/localisations/moose_random_steps.RData')
+```
+
+## 1. Load Covariate Rasters
+
+```{r}
+# Define the root directory where your rasters are stored
+covariate_dir <- "../data/geographical_covariates"
+
+# Get a list of all .tif files in the directory and subdirectories
+covariate_files <- list.files(
+  covariate_dir, 
+  pattern = "\\.tif$", 
+  full.names = TRUE, 
+  recursive = TRUE
+)
+
+covariate_files
+```
+
+```{r}
+# Load rasters and set NAflag
+covariates <- list()
+
+for (f in covariate_files) {
+    r <- rast(f)
+    
+     # Check if the file is in the slu directory (e.g., 2010 or 2005 subdirectory)
+    if (grepl("slu_forest_maps", f)) {
+      # Extract the year from the folder (2005 or 2010) before the filename
+      year <- basename(dirname(f))
+      # Extract the covariate name by removing the .tif extension
+      covariate_name <- paste(
+        "slu", 
+        year,
+        tools::file_path_sans_ext(basename(f)), 
+        sep = "_"
+      )
+    } else {
+      # For other files, just remove the .tif extension
+      covariate_name <- tools::file_path_sans_ext(basename(f))
+    }
+    
+    # TODO probably fix in QGIS / externally
+    if (covariate_name == "elevation") NAflag(r) <- 0
+
+    covariates[[covariate_name]] <- r
+    plot(r, main=covariate_name)
+}
+```
+
+```{r}
+sample_covariate <- function(steps_df, covariate_name) {
+  tic()
+  steps_df <- amt::extract_covariates(
+    steps_df, 
+    where="both",
+    covariates=covariates[[covariate_name]] # the raster
+  )
+  timer_end = toc(quiet=T)$callback_msg
+  print(glue('Finished sampling {covariate_name}, seconds elapsed: {timer_end}'))
+  return(steps_df)
+}
+```
+
+## 2. Sampling Terrain and Forest Covariates
+
+```{r}
+for (covariate in names(covariates)) {
+  if (startsWith(covariate, "landuse")) next
+  moose_random_steps <- sample_covariate(moose_random_steps, covariate)
+}
+```
+
+## 3. Sampling Landuse Covariates
+
+```{r}
+moose_random_steps_new <- moose_random_steps %>% filter(year(t1_) >= 2018)
+moose_random_steps_old <- moose_random_steps %>% filter(year(t1_) < 2018)
+
+moose_random_steps_new <- sample_covariate(moose_random_steps_new, "landuse_2018")
+moose_random_steps_old <- sample_covariate(moose_random_steps_old, "landuse_2003-2017")
+
+moose_random_steps <- bind_rows(moose_random_steps_old, moose_random_steps_new)
+```
+
+### 3.2 Update Landuse Covariates with Felling data
+
+```{r}
+felling_2003_2018 <- st_read('../data/geographical_covariates/felling_2003-2018.gpkg')
+felling_2019_2024 <- st_read(
+  '../data/geographical_covariates/felling_2019-2024.gpkg', 
+  layer="single_parts"
+)
+
+felling_2003_2018 <- felling_2003_2018 %>% rename(felling_year = year)
+felling_2019_2024 <- felling_2019_2024 %>% rename(felling_year = ArendeAr)
+```
+
+```{r}
+process_felling <- function(data, felling_data, time_col, landuse_col) {
+  data %>%
+    st_join(felling_data, left = TRUE) %>%
+    mutate(
+      !!sym(landuse_col) := if_else(
+        !is.na(felling_year) & (year(!!sym(time_col)) > felling_year), 
+        3, 
+        !!sym(landuse_col)
+      )
+    ) %>%
+    select(names(moose_random_steps))
+}
+```
+
+```{r}
+moose_random_steps_start <- st_as_sf(
+  moose_random_steps, 
+  coords = c('x1_', 'y1_'), 
+  crs = 3006, 
+  remove = FALSE
+)
+
+moose_random_steps_new <- process_felling(
+  filter(moose_random_steps_start, year(t1_) > 2019), 
+  felling_2019_2024, 
+  time_col="t1_",
+  landuse_col="landuse_start"
+)
+
+moose_random_steps_old <- process_felling(
+  filter(moose_random_steps_start, year(t1_) <= 2019), 
+  felling_2003_2018, 
+  time_col="t1_",
+  landuse_col="landuse_start"
+)
+
+moose_random_steps <- bind_rows(moose_random_steps_new, moose_random_steps_old) 
+moose_random_steps <- st_drop_geometry(moose_random_steps)
+```
+
+Repeat for end steps
+
+```{r}
+moose_random_steps_end <- st_as_sf(
+  moose_random_steps, 
+  coords = c('x2_', 'y2_'), 
+  crs = 3006, 
+  remove = FALSE
+)
+
+moose_random_steps_new <- process_felling(
+  filter(moose_random_steps_end, year(t2_) > 2019), 
+  felling_2019_2024, 
+  time_col="t2_",
+  landuse_col="landuse_end"
+)
+
+moose_random_steps_old <- process_felling(
+  filter(moose_random_steps_end, year(t2_) <= 2019), 
+  felling_2003_2018, 
+  time_col="t2_",
+  landuse_col="landuse_end"
+)
+
+moose_random_steps <- bind_rows(moose_random_steps_new, moose_random_steps_old)
+moose_random_steps <- st_drop_geometry(moose_random_steps)
+```
+
+### 3.3 Recode Landuse Integers to Labels
+
+```{r}
+landuse_classes <- c(
+  "Coniferous forest",
+  "Dedicious & mixed forest",
+  "Clear-cut & young forest",
+  "Open",
+  "Wetland",
+  "Water bodies",
+  "Anthropogenic",
+  "Low mountain forest"
+)
+landuse_classes <- setNames(landuse_classes, 1:8)
+```
+
+```{r}
+moose_random_steps$landuse_start <- recode(
+  moose_random_steps$landuse_start, 
+  !!!landuse_classes)
+moose_random_steps$landuse_end <- recode(
+  moose_random_steps$landuse_end, 
+  !!!landuse_classes
+)
+```
+
+```{r}
+write.csv(moose_random_steps, '../data/localisations/moose_random_steps.csv')
+```

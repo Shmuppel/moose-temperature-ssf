@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from geoalchemy2 import RasterElement
 import geoalchemy2.functions as gfunc
 
-from models import WeatherData, WeatherStation
+from smhi.models import WeatherData, WeatherStation
 
 def get_weather_data_at_time(
         session: Session,

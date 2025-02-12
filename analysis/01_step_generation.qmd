@@ -13,7 +13,7 @@ editor: visual
 #| warning: false
 
 library(tidyverse)
-packages <- c("amt", "lubridate", "tictoc", "sf", "ggspatial")
+packages <- c("amt", "lubridate", "sf", "ggspatial")
 walk(packages, require, character.only = T)
 ```
 
@@ -158,7 +158,7 @@ strata_coverage <- moose %>%
 ```
 
 ```{r}
-ggplot(moose_strata_distribution, aes(x=strata_percentage)) +
+ggplot(strata_coverage, aes(x=strata_percentage)) +
   geom_histogram(aes(fill = ..count..)) +
   scale_fill_viridis_c(option = "plasma") +
   labs(title = "Histogram of Strata Percentage", x = "Strata Percentage", y = "Count") +
@@ -205,6 +205,24 @@ ggplot() +
 ```
 
 ```{r}
+# TODO remove when lubridate fixes this
+round_to_hour <- function(dt) {
+  # Extract components
+  hr <- hour(dt)
+  min <- minute(dt)
+  sec <- second(dt)
+  
+  # Determine if rounding up is needed
+  round_up <- min > 30 | (min == 30 & sec > 0)
+  
+  # Apply rounding: If rounding up, add an hour and set min/sec to 0
+  dt <- floor_date(dt, "hour") + dhours(round_up)
+  
+  return(dt)
+}
+```
+
+```{r}
 # nest the data by individual
 moose_steps <- moose_tracks %>% arrange(animal_id) %>% nest(data = -"animal_id")
 
@@ -221,13 +239,23 @@ moose_steps_by_burst <- moose_steps_by_burst %>%
   amt::unnest(cols = steps)
 
 moose_steps_by_burst <- moose_steps_by_burst %>% 
-  mutate(t2_rounded = round_date(t2_, "hour"), # round the time to the nearest hour
-         hour_t2 = ifelse(hour(t2_rounded) == 0, 24, hour(t2_rounded))) # change the 0 hour to 24
+  mutate(
+    # round the time to the nearest hour
+    t1_ = round_to_hour(t1_),
+    t2_ = round_to_hour(t2_),
+    # change the 0 hour to 24
+    hour_t1 = ifelse(hour(t1_) == 0, 24, hour(t1_)),
+    hour_t2 = ifelse(hour(t2_) == 0, 24, hour(t2_))
+  )
 
 head(moose_steps_by_burst, 10)
 ```
 
 ## 2.2 Fit step-length and turning-angle distributions for each strata
+
+Lets fit a gamma distribution for step length, and a von Mises distribution for turning angle for the moose localisations in every strata. We do this on the population level as that makes correcting the selection-free movement kernel later on easier. We do divide the population into four sub-populations for each strata, as there are clear differences in step-length between boreal and temperate moose populations.
+
+The distribution parameters will be important later on when we correct the selection-free movement kernel, so print them here.
 
 ```{r}
 moose_steps_by_burst <- moose_steps_by_burst %>% 
@@ -235,11 +263,6 @@ moose_steps_by_burst <- moose_steps_by_burst %>%
 ```
 
 ```{r}
-library(dplyr)
-library(purrr)
-library(tidyr)
-library(tictoc)
-
 # Fit distributions for each strata
 dist_params <- moose_steps_by_burst %>%
   group_by(strata) %>%
@@ -257,6 +280,8 @@ print(dist_params)
 
 ## 2.3 Generate random steps for each strata (population)
 
+For each real step, we generate 10 random steps.
+
 ```{r}
 moose_random_steps <- moose_steps_by_burst %>%
   group_split(strata) %>%
@@ -273,6 +298,7 @@ moose_random_steps <- moose_steps_by_burst %>%
       mutate(y = as.numeric(case_))
   })
 
+moose_random_steps <- remove_incomplete_strata(moose_random_steps, col = "ta_")
 print(moose_random_steps)
 ```
 
@@ -307,5 +333,5 @@ ggplot() +
 # 3 Export results
 
 ```{r}
-write.csv(moose_random_steps, '../data/localisations/moose_random_steps.csv')
+save(moose_random_steps, file='../data/localisations/moose_random_steps.RData')
 ```

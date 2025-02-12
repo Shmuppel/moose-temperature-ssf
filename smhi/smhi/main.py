@@ -1,8 +1,9 @@
-from conn import get_engine
-from seed.station import seed_weather_stations
-from seed.station_data import seed_weather_data
+from dotenv import load_dotenv
+from smhi.conn import get_engine
+from smhi.seed.station import seed_weather_stations
+from smhi.seed.station_data import seed_weather_data
 
-from models import Base, WeatherData, WeatherStation
+from smhi.models import Base, WeatherData, WeatherStation
 
 def init_db(engine):
     WeatherData.__table__.drop(engine)

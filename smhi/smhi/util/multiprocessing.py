@@ -1,7 +1,7 @@
 import os
 import multiprocessing as mp
 from alive_progress import alive_bar
-from conn import get_engine
+from smhi.conn import get_engine
 
 class BaseWorker(mp.Process):
     """
@@ -44,7 +44,8 @@ class BaseManager:
     """
     Base class for managers to handle job creation, worker management, and progress tracking.
     """
-    def __init__(self, engine, title, num_workers=int(os.getenv("CORES"))):
+    def __init__(self, engine, title, num_workers=-1):
+        self.num_workers = os.cpu_count() if num_workers == -1 else num_workers
         self.engine = engine
         self.manager = mp.Manager()
         self.title = title

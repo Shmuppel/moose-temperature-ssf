@@ -11,8 +11,8 @@ from sqlalchemy import insert, select
 import sqlalchemy.orm as orm
 
 # Local imports
-from util.multiprocessing import BaseWorker, BaseManager
-from models import WeatherData, WeatherStation
+from smhi.util.multiprocessing import BaseWorker, BaseManager
+from smhi.models import WeatherData, WeatherStation
 
 
 class CachedLimiterSession(CacheMixin, LimiterMixin, Session):
@@ -74,11 +74,13 @@ class WeatherDataWorker(BaseWorker):
         df["date"] = pd.to_datetime(df["date"] + " " + df["time"], format="%Y-%m-%d %H:%M:%S")
         # TODO remove
         df = df[df["date"] >= pd.Timestamp("2002-01-01")]
-
+        df["date"] = df["date"].dt.tz_localize('UTC')
+        df["date_local"] = df["date"].dt.tz_convert('Europe/Stockholm')
+        
         # Add additional columns derived from the WeatherStation object
         df["weather_station_id"] = weather_station.id
         df["parameter"] = weather_station.parameter
-        df = df[["weather_station_id", "date", "parameter", "value", "quality"]]
+        df = df[["weather_station_id", "date", "date_local", "parameter", "value", "quality"]]
 
         return df.to_dict(orient="records")
 
@@ -96,5 +98,5 @@ class WeatherDataManager(BaseManager):
 
 def seed_weather_data(engine) -> None:
     """Run the full seeding process for weather stations and data."""
-    manager = WeatherDataManager(engine, title="Seeding Weather Data")
+    manager = WeatherDataManager(engine, num_workers=8, title="Seeding Weather Data")
     manager.run(WeatherDataWorker)
