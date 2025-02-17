@@ -7,14 +7,7 @@
 #   - Fitting the empirical variogram and then a sum–metric variogram model.
 #
 # It returns a list with the key objects for later prediction.
-build_weather_kriging_model <- function(localisations, weather_data, parameter = "air_temperature") {
-  
-  # Get the time period from localisations
-  get_time_period <- function(localisations) {
-    start_date <- min(localisations$t1_, na.rm = TRUE)
-    end_date   <- max(localisations$t1_, na.rm = TRUE)
-    list(start = start_date, end = end_date)
-  }
+build_weather_kriging_model <- function(weather_data, parameter = "air_temperature") {
   
   # Fit regression and transform data 
   fit_regression <- function(weather_data) {
@@ -22,23 +15,26 @@ build_weather_kriging_model <- function(localisations, weather_data, parameter =
     weather_data$value_trans <- predict(power_trans)
     lin_mod <- lm(value_trans ~ elevation + gtt, data = weather_data)
     weather_data$res <- resid(lin_mod)
-    list(model = lin_mod, power_trans = power_trans, weather_data = weather_data)
+    
+    list(
+      model = lin_mod, 
+      power_trans = power_trans, 
+      weather_data = weather_data
+    )
   }
   
   # Create a space–time data frame (STFDF)
   create_stfdf <- function(weather_data) {
-    # Remove geometry for STFDF creation
-    weather_data_df <- st_drop_geometry(weather_data)
-    stations <- weather_data_df %>% distinct(station_id, x, y)
-    obs      <- weather_data_df %>% select(station_id, date, value, elevation, gtt, res)
+    stations <- weather_data %>% distinct(station_id, x, y)
+    obs      <- weather_data %>% select(station_id, date, value, elevation, gtt, res)
     obs      <- as.data.frame(obs)
     stations <- as.data.frame(stations)
     stfdf <- meteo::meteo2STFDF(
       obs,
       stations,
-      obs.staid.time       = c("station_id", "date"),
+      obs.staid.time = c("station_id", "date"),
       stations.staid.lon.lat = c("station_id", "x", "y"),
-      crs                  = CRS('epsg:3006')
+      crs = CRS('epsg:3006')
     )
     # Remove duplicates using zerodist
     zd <- zerodist(stfdf@sp)
@@ -50,7 +46,7 @@ build_weather_kriging_model <- function(localisations, weather_data, parameter =
   fit_variogram <- function(weather_stfdf) {
     diff_time <- as.integer(diff(index(weather_stfdf@time))[1])
     tlags <- 0:ceiling(10 / diff_time)
-    empirical_variogram <- variogramST(res ~ 1, weather_stfdf, tlags = tlags)
+    empirical_variogram <- variogramST(res ~ 1, weather_stfdf, tlags = tlags, progress=F)
     empirical_variogram$timelag <- as.numeric(empirical_variogram$timelag)
     
     # Estimate spatial anisotropy
@@ -67,7 +63,7 @@ build_weather_kriging_model <- function(localisations, weather_data, parameter =
     fit_sum_metric_model <- fit.StVariogram(
       empirical_variogram, 
       sum_metric_model, 
-      lower     = c(0, 0.001, 0, 0.01, 1),
+      lower = c(0, 0.001, 0, 0.01, 1),
       fit.method = 8
     )
     attr(fit_sum_metric_model, "temporal unit") <- "hours"
@@ -75,23 +71,19 @@ build_weather_kriging_model <- function(localisations, weather_data, parameter =
   }
   
   # ---- Main steps within build_weather_kriging_model ----
+  # 1. Add variables to weather data
+  weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable = "mean")
   
-  # 1. Determine time period from localisation data
-  time_period <- get_time_period(localisations)
-  
-  # 2. Add variables to weather data
-  weather_data$gtt <- temp_geom(data$day, data$lat, variable = "mean")
-  
-  # 3. Fit regression and transform data
+  # 2. Fit regression and transform data
   reg_results <- fit_regression(weather_data)
   weather_data <- reg_results$weather_data
   linear_regression <- reg_results$model
   power_transform <- reg_results$power_trans
   
-  # 4. Create space-time data frame
+  # 3. Create space-time data frame
   weather_stfdf <- create_stfdf(weather_data)
   
-  # 5. Fit the variogram model
+  # 4. Fit the variogram model
   variogram_model <- fit_variogram(weather_stfdf)
   
   # Return all the key objects needed for prediction
@@ -125,12 +117,16 @@ predict_weather_at_localisations <- function(
   # Build spatio-temporal object for localisations
   create_moose_st <- function(localisations) {
     localisations <- as.data.frame(localisations)
-    moose_sf <- st_as_sf(localisations, coords = c("x", "y"), crs = CRS('epsg:3006'))
+    moose_sf <- st_as_sf(
+      localisations, 
+      coords = c("x", "y"), 
+      crs = CRS('epsg:3006')
+    )
     spatial_points <- as(moose_sf, "Spatial")
     st_obj <- stConstruct(
       localisations, 
       space = c("x", "y"), 
-      time  = "t1_", 
+      time  = "time", 
       spatial_points,
       crs   = CRS('epsg:3006')
     )
@@ -146,41 +142,25 @@ predict_weather_at_localisations <- function(
       kriging_model$variogram_model, 
       maxdist    = maxdist,
       nmax       = nmax, 
-      computeVar = TRUE
+      computeVar = F, # TODO incorporate
+      progress = F
     )
     return(krige_result@data$var1.pred)
   }
   
   # ---- Main steps within predict_weather_at_localisations ----
-  
+  print(1)
   localisations <- prepare_localisation_predictions(localisations, kriging_model$linear_regression)
+  print(2)
   moose_st <- create_moose_st(localisations)
+  print(3)
   predicted_res <- krige_residuals(kriging_model, moose_st, maxdist, nmax)
+  print(4)
   pred_combined <- localisations$pred_lin + predicted_res
+  print(5)
   final_prediction <- predict(kriging_model$power_transform, newdata = pred_combined, inverse = TRUE)
   
   return(final_prediction)
-}
-
-# Helper: Process raw localisation data
-# (Assumes your raw localisation data has columns "t1_", "x1_", "y1_", and "elevation_start")
-prepare_localisations <- function(df) {
-  df_sf <- st_as_sf(df, coords = c("x1_", "y1_"), crs = CRS('epsg:3006'))
-  df_sf <- df_sf %>%
-    mutate(
-      x   = st_coordinates(.)[,1],
-      y   = st_coordinates(.)[,2],
-      day = yday(t1_)
-    ) %>%
-    st_transform(., st_crs(4326)) %>%
-    mutate(lat = st_coordinates(.)[,2]) %>%
-    arrange(t1_)
-  df_prepared <- st_drop_geometry(df_sf) %>%
-    rename(elevation = elevation_start)
-  
-  # Add gtt
-  df_prepared$gtt <- temp_geom(df_sf$day, df_sf$lat, variable = "mean")
-  return(df_prepared)
 }
 
 # Prepare start steps: these originally use t1_ and elevation_start.
@@ -194,6 +174,7 @@ prepare_start_steps <- function(df) {
     ) %>%
     arrange(time) %>%
     rename(elevation = elevation_start)
+  df$gtt <- temp_geom(df$day, df$lat, variable = "mean")
   return(df)
 }
 
@@ -208,5 +189,6 @@ prepare_end_steps <- function(df) {
     ) %>%
     arrange(time) %>%
     rename(elevation = elevation_end)
+  df$gtt <- temp_geom(df$day, df$lat, variable = "mean")
   return(df)
 }

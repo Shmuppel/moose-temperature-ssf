@@ -24,3 +24,8 @@ The database can then be seeded with weather data by running `python3 smhi/main.
 - add irradiance as covariate to point data (?)
 - look into good ways to interpolate precipitation, if any
 - look into good ways to interpolate wind, if any (known effect on non-wild moose)
+- poly in elevation?
+
+- collar temp - air temp to see body heat cycle?
+
+2012-01-23 00:00:00 -21.8 -3.33
