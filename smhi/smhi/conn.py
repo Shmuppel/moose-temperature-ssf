@@ -6,8 +6,6 @@ import logging
 logging.basicConfig()
 logging.getLogger("sqlalchemy.engine.Engine.smhi").setLevel(logging.INFO)
 
-load_dotenv()
-
 def get_engine():
     """Create and return the database engine."""
     config = {

@@ -3,7 +3,6 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from geoalchemy2 import RasterElement
 import geoalchemy2.functions as gfunc
 
 from smhi.models import WeatherData, WeatherStation
@@ -13,17 +12,41 @@ def get_weather_data_at_time(
         timestamp: datetime,
         parameter: str
     ):
-    ...
+    query = (
+       select(
+           WeatherData.date_local,
+           WeatherData.value,
+           WeatherData.parameter,
+           WeatherData.quality,
+           WeatherStation.id, 
+           WeatherStation.height,
+           gfunc.ST_X(WeatherStation.geom).label("x"),
+           gfunc.ST_Y(WeatherStation.geom).label("y")
+        )
+        .join(WeatherStation, WeatherData.weather_station_id == WeatherStation.id)
+        .where(WeatherData.parameter == parameter)
+        .where(WeatherData.date == timestamp)
+    )
+    weather_data = session.execute(query).fetchall()
+    weather_df = pd.DataFrame(weather_data, columns=[
+        "date_local", "value", "parameter", "quality",
+        "station_id", "station_elevation", 
+        "x", "y"
+    ])
+    return weather_df
 
 def get_weather_data_in_time_range(
         session: Session,
-        time_range: list[datetime],
+        time_range: list[datetime, datetime], 
         parameter: str
     ):
     query = (
        select(
-           WeatherData,
-           WeatherStation, 
+           WeatherData.date_local,
+           WeatherData.value,
+           WeatherData.parameter,
+           WeatherStation.id, 
+           WeatherStation.height,
            gfunc.ST_X(WeatherStation.geom).label("x"),
            gfunc.ST_Y(WeatherStation.geom).label("y")
         )
@@ -32,10 +55,12 @@ def get_weather_data_in_time_range(
         .where(WeatherData.date >= time_range[0])
         .where(WeatherData.date <= time_range[1])
     )
-    
     weather_data = session.execute(query).fetchall()
-    breakpoint()
-    weather_df = pd.DataFrame(weather_data, columns=["value", "date", "elevation", "landuse", "x", "y"])
+    weather_df = pd.DataFrame(weather_data, columns=[
+        "date_local", "value", "parameter", 
+        "station_id", "station_elevation", 
+        "x", "y"
+    ])
     return weather_df
 
 def get_nearest_value_to_point(

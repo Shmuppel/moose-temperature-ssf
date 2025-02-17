@@ -62,8 +62,9 @@ class WeatherDataWorker(BaseWorker):
             usecols=[0, 1, 2, 3],
             names=["date", "time", "value", "quality"],
             dtype={'date': str, 'time': str, 'value': np.float32, 'quality': str}
-        )
-
+        )  
+        df = df[df['quality'] == 'G']
+        
         # Handle edge cases where data is missing or formatted unusually
         df = df[(df['date'] != '') & df['date'].notna()]
         if df.empty:

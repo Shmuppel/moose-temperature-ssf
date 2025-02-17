@@ -15,6 +15,7 @@ editor: visual
 library(tidyverse)
 packages <- c("amt", "lubridate", "sf", "ggspatial")
 walk(packages, require, character.only = T)
+set.seed(20240307)
 ```
 
 ```{r}
@@ -42,7 +43,11 @@ moose <- moose %>%
   arrange(date, .by_group=T) %>%  # Within each animal_id, sort by timestamps
   distinct(date, .keep_all = T) %>%  # Remove duplicate timestamps for animals
   arrange(animal_id) %>% # Sort by animal_id
-  mutate(date = force_tz(ymd_hms(date), tzone="Europe/Stockholm")) %>%
+  mutate(
+    long = x, # we'll keep a copy of the WGS84 coords
+    lat = y, # we'll need latitude later in the analysis for some covariates
+    date = force_tz(ymd_hms(date), tzone="Europe/Stockholm")
+  ) %>%
   ungroup()
 ```
 
@@ -184,6 +189,8 @@ moose <- moose %>%
 
 Now we create the tracks using the `amt` package.
 
+We'll also re-project from EPSG:4326 to EPSG:3006 (SWEFREFF-99), the current standard CRS of Sweden.
+
 ```{r}
 moose_tracks <- moose %>% mk_track(id = animal_id,
                                    .x=x,
@@ -283,6 +290,10 @@ print(dist_params)
 For each real step, we generate 10 random steps.
 
 ```{r}
+number_of_random_steps = 5
+```
+
+```{r}
 moose_random_steps <- moose_steps_by_burst %>%
   group_split(strata) %>%
    map_dfr(~ {
@@ -292,7 +303,7 @@ moose_random_steps <- moose_steps_by_burst %>%
     class(.x) <- class(moose_steps_by_burst)
     # Generate random steps
     .x %>%
-      random_steps(n_control = 10,
+      random_steps(n_control = number_of_random_steps,
                    sl_distr = gamma_dist,
                    ta_distr = vonmises_dist) %>%
       mutate(y = as.numeric(case_))
@@ -319,16 +330,11 @@ ggplot() +
 
 ### 2.4.1 Step length (negative gamma) distribution for each strata
 
-```{r}
-```
-
-```{r}
-```
+TODO
 
 ### 2.4.1 Turning angle (von Mises) distribution for each strata
 
-```{r}
-```
+TODO
 
 # 3 Export results
 

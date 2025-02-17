@@ -1,241 +1,295 @@
 # Sample Weather Covariates Through Space-Time Regression Kriging
 
 ```{python}
+import time
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import rasterio
+from scipy import stats
+from sklearn.cluster import DBSCAN
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
 import sklearn.metrics
 import stif
+import scipy
 
 from smhi.conn import get_engine
 from smhi.weather import get_weather_data_in_time_range
 from sqlalchemy.orm import Session
 ```
 
-First lets load the random steps we created earlier, it's important that they have been annotated with the geographical covariates as we'll be using some of the in the regression part of this analysis.
-
 ```{python}
-df = pd.read_csv('../data/localisations/moose_random_steps.csv', index_col=0)
-gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df['x1_'], df['y1_']), crs=3006)
-gdf.head(3)
+class Weather:
+  def __init__(self):
+    self.smhi_engine = get_engine()
+
+  def get_season_dates(self, season, year):
+      """
+      Given a season name (winter/summer) and year, return the start and end dates
+      for that season (December to March for Winter, June to August for Summer).
+      """
+      if season == "winter":
+          season_start = pd.Timestamp(f"{year - 1}-12-01").tz_localize('Europe/Stockholm')
+          season_end = pd.Timestamp(f"{year}-03-31").tz_localize('Europe/Stockholm')
+      elif season == "summer":
+          season_start = pd.Timestamp(f"{year}-06-01").tz_localize('Europe/Stockholm')
+          season_end = pd.Timestamp(f"{year}-08-31").tz_localize('Europe/Stockholm')
+      
+      return season_start, season_end
+
+  def preprocess_gdf(self, gdf, start_date):
+    gdf = gdf.rename(columns={"station_elevation": "elevation"})
+    gdf["date_local"] = gdf["date_local"].dt.tz_localize('Europe/Stockholm')
+    gdf["hour"] = gdf["date_local"] - start_date
+    gdf["hour"] = gdf["hour"].dt.total_seconds() / 3600
+    gdf["hour"] = gdf["hour"].astype(int)
+
+    return gdf
+
+  def get_weather_data(self, start_date, end_date, parameter):
+    with Session(self.smhi_engine) as session:
+      df = get_weather_data_in_time_range(
+        session, 
+        time_range=[start_date, end_date], 
+        parameter=parameter
+      ) 
+    gdf = gpd.GeoDataFrame(
+      df, 
+      geometry=gpd.points_from_xy(df['x'], df['y']), 
+      crs=3006
+    )
+    gdf = self.preprocess_gdf(gdf, start_date)
+
+    q_low = gdf["value"].quantile(0.001)
+    q_hi  = gdf["value"].quantile(0.999)
+    df_filtered = gdf[(gdf["value"] < q_hi) & (gdf["value"] > q_low)]
+    gdf["value_trans"], trans = stats.yeojohnson(gdf["value"])
+
+    gdf = gdf.sort_values(by=['hour'])
+    gdf = gdf[gdf["station_id"] != 704]
+    return gdf
+
 ```
 
 ```{python}
-gdf = gdf[gdf["case_"] == 1]
-gdf = gdf[["step_id_", "x1_", "y1_", "t1_", "season", "season_year"]]
-gdf.head(3)
-```
+class RegressionKrige:
+  def __init__(self):
+    self.weather = Weather()
+    self.covariate_colnames = ["elevation"]
 
-# TODO remove when new weather data seeded, then use local date
-```{python}
-gdf = gdf.rename(columns={
-  "x1_": "x",
-  "y1_": "y",
-  "t1_": "date",
-})
-gdf["date"] = pd.to_datetime(gdf["date"])
-gdf["date"] = 
+  def get_prediction_df(self, season_steps, position, season_start):
+    """ Helper function to create prediction data from steps """
+    i = 1 if position == "start" else 2
+    if position == "start":
+      season_steps = season_steps[season_steps['case_'] == 1]
 
-# gdf["elevation"] = gdf["elevation"].astype(int)
+    prediction_df = season_steps[
+      [f"x{i}_", f"y{i}_", f"t{i}_", f"elevation_{position}"]
+    ]
+    prediction_df = prediction_df.rename(columns={
+      f'x{i}_': 'x', 
+      f'y{i}_': 'y', 
+      f't{i}_': "hour", 
+      f"elevation_{position}": "elevation"
+    })
 
-gdf["month"] = gdf["date"].dt.month
+    print(season_start)
+    print(prediction_df["hour"].min())
+    print(prediction_df["hour"].max())
 
-  gdf["hour"] = gdf["date"]
-  gdf["hour"] -= gdf["hour"].min()
-  gdf["hour"] = gdf["hour"].dt.total_seconds() / 3600
-  gdf["hour"] = gdf["hour"].astype(int)
-  gdf = gdf.sort_values(by=['hour'])
+    prediction_df["hour"] = prediction_df["hour"] - season_start
+    prediction_df["hour"] = prediction_df["hour"].dt.total_seconds() / 3600
+    prediction_df["hour"] = prediction_df["hour"].astype(int)
+
+    return(prediction_df)
   
+  def fit_to_season_data(
+    self, 
+    weather_gdf, 
+    cross_validate=False, 
+    show_plots=False
+  ):
+    unique_dates = weather_gdf["date_local"].sort_values().unique()
+    tbins = unique_dates[2] - unique_dates[1]
+    tbins = int(tbins.seconds / 3600) + 1
+
+    variogram_params = {
+      "space_dist_max": 5e5,
+      "time_dist_max": 12,
+      "n_time_bins": tbins
+    }
+    kriging_params = {
+      "space_dist_max": 4e5,
+      "min_kriging_points": 1,
+      "max_kriging_points": 10,
+      "time_dist_max": 3
+    } 
+
+    class KFoldSplit(sklearn.model_selection.KFold): 
+      def init(self): 
+        super().__init__(shuffle=True, random_state=42)
+
+    data = stif.Data(
+      weather_gdf,
+      space_cols=["x", "y"],
+      time_col="hour",
+      predictand_col="value_trans",
+      covariate_cols=self.covariate_colnames,
+    )
+    covariate_model = LinearRegression()
+    predictor = stif.Predictor(data, covariate_model)
+    predictor.calc_cross_validation(cv_split=KFoldSplit)
+    score = predictor.get_cross_val_metric(sklearn.metrics.explained_variance_score)
+    print("Explained variance for folds by regression model: ", score)
+
+    predictor.calc_empirical_variogram(**variogram_params)
+
+    if show_plots: 
+      predictor.plot_empirical_variogram()
+      predictor.plot_variogram_model_comparison()
+
+    if cross_validate:
+      print("starting cross validation")
+      predictor.calc_cross_validation(
+        kriging=True,
+        geostat_params={
+            "variogram_params": variogram_params,
+            "kriging_params": kriging_params,
+        },
+        cv_split=KFoldSplit,
+        verbose=True
+      )
+      predictor.plot_cross_validation_residuals()
+      print(predictor.get_cross_val_metric(sklearn.metrics.mean_absolute_error))
+
+    predictor.fit_variogram_model(st_model='sum_metric')
+    return predictor
+
+  def predict_for_season(
+      self, 
+      steps,
+      parameter,
+      start_date,
+      end_date,
+      cross_validate=False,
+      show_plots=False
+    ):
+    weather_gdf = self.weather.get_weather_data(start_date, end_date, parameter)
+    predictor = self.fit_to_season_data(weather_gdf, cross_validate, show_plots)
+    predictor.fit_variogram_model(st_model='sum_metric')
+
+    # # PREDICT
+    # prediction_start = self.get_prediction_df(steps, 'start', start_date)
+    # prediction_end = self.get_prediction_df(steps, 'end', start_date)
+
+    # start = time.time()
+    # print(f"Predicting {prediction_start.shape[0]} start steps")
+    # res_mean_start, res_std_start = predictor.predict(
+    #   prediction_start,
+    #   self.kriging_params
+    # )
+    # end = time.time()
+    # print("Predicting took ", abs(start - end) / 60, " minutes")
+
+    # start = time.time()
+    # print(f"Predicting {prediction_end.shape[0]} end steps")
+    # res_mean_end, res_std_end = predictor.predict(
+    #   prediction_end,
+    #   self.kriging_params
+    # )
+    # end = time.time()
+    # print("Predicting took ", abs(start - end) / 60, " minutes")
+
+    # return(res_mean_start, res_mean_end, res_std_start, res_std_end)
+```
+
+# Predict air temperature at start and end steps
+
+Lets load the random steps we created earlier, it's important that they have been annotated with the geographical covariates as we'll be using some of the in the regression part of this analysis.
+
+```{python}
+random_steps_df = pd.read_csv('../data/localisations/moose_random_steps.csv', index_col=0)
+```
+
+
+```{python}
+random_steps_df = random_steps_df[[
+    "step_id_", 
+    "x1_", "y1_", "t1_",
+    "x2_", "y2_", "t2_",
+    "elevation_start", "elevation_end",
+    "season", "season_year",
+    "case_"
+]]
+random_steps_df.head(3)
+```
+
+We have 0 elevation_starts and 9 elevation_ends with NA values,none of them the real steps. We opt to remove them.
+
+```{python}
+random_steps_df[random_steps_df["elevation_start"].isna()]
+random_steps_df = random_steps_df.dropna(axis='rows', subset='elevation_start')
+
+random_steps_df[random_steps_df["elevation_end"].isna()]
+random_steps_df = random_steps_df.dropna(axis='rows', subset='elevation_end')
 ```
 
 ```{python}
-# For weather covariates its important we base them on the start of the step only, as that's why the animals decision is made
-# If you wanted to see if animals could predict weather, end step could be a fun experiment!
-gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df['x1_'], df['y1_']), crs=3006)
+random_steps_df["elevation_start"] = random_steps_df["elevation_start"].astype(int)
+random_steps_df["elevation_end"] = random_steps_df["elevation_end"].astype(int)
 ```
 
 ```{python}
-gdf.columns
+random_steps_df["t1_"] = pd.to_datetime(random_steps_df["t1_"], format='ISO8601')
+random_steps_df["t2_"] = pd.to_datetime(random_steps_df["t2_"], format='ISO8601')
+random_steps_df["t1_"] = random_steps_df["t1_"].dt.tz_localize('Europe/Stockholm')
+random_steps_df["t2_"] = random_steps_df["t2_"].dt.tz_localize('Europe/Stockholm')
+random_steps_df['month'] = random_steps_df['t1_'].dt.month
 ```
 
 ```{python}
-# TODO remove with updated weather data variables
-gdf = gdf[gdf["case_"] == 1,] # only need to calculate begin steps, so the real step start
-gdf = gdf[["x1_", "y1_", "step_id_"]] # elevation
+random_steps_df.head()
+```
+
+## Fit regression kriging model for each season and annotate steps
+
+```{python}
+unique_season_years = random_steps_df[['season', 'season_year', 'month']].drop_duplicates().itertuples(index=False)
 ```
 
 ```{python}
-def get_season_dates(season, year):
-  """
-  Given a season name (winter/summer) and year, return the start and end dates
-  for that season (December to March for Winter, June to August for Summer).
-  """
-  if season == "winter":
-      season_start = pd.Timestamp(f"{year}-12-01").tz_localize('Europe/Stockholm')
-      season_end = pd.Timestamp(f"{year + 1}-03-31").tz_localize('Europe/Stockholm')
-  elif season == "summer":
-      season_start = pd.Timestamp(f"{year}-06-01").tz_localize('Europe/Stockholm')
-      season_end = pd.Timestamp(f"{year}-08-31").tz_localize('Europe/Stockholm')
-  
-  return season_start, season_end
+krige = RegressionKrige()
+import calendar
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+for season, year, month in unique_season_years:
+    if season == "winter": continue
+    
+    first_month_day = datetime(
+      year, month, 1, 
+      tzinfo=ZoneInfo("Europe/Stockholm")
+    )
+    last_month_day = datetime(
+      year, month, 7,
+      tzinfo=ZoneInfo("Europe/Stockholm")
+    )
 
-def get_seasonal_weather_data(season, year):
-  smhi_engine = get_engine()
-  with Session(engine) as Session:
-    df = get_weather_data_in_time_range(
-      session, 
-      time_range=[start_date, end_date], 
-      parameter="air_temperature"
-    ) 
-    df = df.drop_duplicates(subset=["x", "y", "date"])
-```
+    subset = random_steps_df[
+      (random_steps_df['season'] == season) & 
+      (random_steps_df['season_year'] == year) &
+      (random_steps_df['month'] == month)
+    ]
 
-```{python}
-def remove_clustered_space_time_coords(gdf):
-  # Convert timestamps to a numerical scale 
-  gdf['timestamp_numeric'] = gdf['date'].astype(int) / 1e9 # Convert to seconds 
-  # Combine spatial and temporal features 
-  coords_time = np.column_stack((gdf.geometry.x, gdf.geometry.y, gdf['timestamp_numeric'])) 
-  # Fit DBSCAN (adjust eps values for space/time) 
-  clustering = DBSCAN(eps=100, min_samples=2, metric='euclidean').fit(coords_time) 
-  gdf = gdf[clustering.labels_ == -1] 
-  gdf = gdf.drop(columns=["timestamp_numeric"]) 
-
-  return gdf
-```
-
-```{python}
-def create_variogram():
-  variogram_params = {
-    "space_dist_max": 8e5,
-    "time_dist_max": 10,
-    "el_max": 1e8
-  } 
-  predictor.calc_empirical_variogram(**variogram_params)
-  predictor.plot_empirical_variogram()
-  predictor.plot_variogram_model_comparison()
-
-def create_space_time_kriging_model(gdf):
-  covariate_colnames = ["elevation"]
-  data = stif.Data(
-    gdf,
-    space_cols=["x", "y"],
-    time_col="hour",
-    predictand_col="value",
-    covariate_cols=covariate_colnames,
-  )
-
-  # Create Linear Regression Model
-  covariate_model = LinearRegression()
-  predictor = stfi.Predictor(data, covariate_model)
-
-  predictor.calc_cross_validation(cv_split=ShuffledKFold)
-  score = predictor.get_cross_val_metric(sklearn.metrics.explained_variance_score)
-  print("Explained variance by linear regression model: ", score)
-  predictor.plot_cross_validation_residuals()
-
-def fit_kriging_model():
-  kriging_params = {
-    "min_kriging_points": 1,
-    "max_kriging_points": 10,
-    "space_dist_max": 3e5,
-    "time_dist_max": 3
-  }
-  cross_validate(predictor, kriging_params, variogram_params)
-```
-
-```{python}
-
-from datetime import datetime import pandas as pd import matplotlib.pyplot as plt import geopandas as gpd from sklearn.linear_model import LinearRegression import sklearn.metrics import rioxarray as rxr
-
-from sqlalchemy.orm import Session from stif import Data from stif import Predictor from sklearn.cluster import DBSCAN import numpy as np
-
-from database.animal.models import Localisation from database.base import get_engine from database.weather.functions import get_weather_data
-
-class ShuffledKFold(sklearn.model_selection.KFold): def init(self, n_splits): super().__init__(n_splits, shuffle=True)
-
-def cross_validate(predictor, kriging_params, variogram_params): # Create kriging cross validation predictor.calc_cross_validation( kriging=True, verbose=True, geostat_params={ "variogram_params": variogram_params, "kriging_params": kriging_params, }, cv_split=ShuffledKFold ) predictor.plot_cross_validation_residuals() print(predictor.get_cross_val_metric(sklearn.metrics.mean_absolute_error))
-
-def get_kriging_data(engine, show_plots=True, cross_validate=False): with Session(engine) as session: gdf = get_seasonal_weather_data(session) gdf = remove_clustered_space_time_coords(gdf)
-
-# gdf = pd.get_dummies(gdf, drop_first=True) # for landuse classes
-covariate_colnames = [col for col in list(gdf.columns.values) if col not in ("geometry", "hour", "date", "value", "landuse")]
-data = stif.Data(
-  gdf,
-  space_cols=["x", "y"],
-  time_col="hour",
-  predictand_col="value",
-  covariate_cols=covariate_colnames,
-)
-
-
-
-# Create space-time variogram
-variogram_params = {
-  "space_dist_max": 8e5,
-  "time_dist_max": 10,
-  "el_max": 1e8
-} 
-predictor.calc_empirical_variogram(**variogram_params)
-
-if show_plots:
-  predictor.plot_empirical_variogram()
-  predictor.plot_variogram_model_comparison()
-
-# FULL FITTING OF MODEL
-kriging_params = {
-  "min_kriging_points": 1,
-  "max_kriging_points": 10,
-  "space_dist_max": 3e5,
-  "time_dist_max": 3
-}
-if cross_validate:
-  cross_validate(predictor, kriging_params, variogram_params)
-
-# PREDICT
-predictor.fit_variogram_model(st_model='sum_metric')
-
-dem = rxr.open_rasterio("data/geography/elevation/elevation.tif")
-dem = dem.sel(band=1).where(dem != 0)
-dem.name = "elevation"
-dem_coarse = dem.coarsen(x=100, y=100, boundary="trim").mean(skipna=True)
-pred_grid = dem_coarse.to_dataframe().reset_index()[["x", "y", "elevation"]]
-
-prediction_df = pd.DataFrame({"x": pred_grid["x"], "y": pred_grid["y"], "elevation": pred_grid["elevation"], "hour": 800})
-prediction_df = prediction_df.dropna()
-prediction_df["elevation"] = prediction_df["elevation"].astype(int)
-
-prediction_gdf = gpd.GeoDataFrame(
-  prediction_df,
-  geometry=gpd.points_from_xy(prediction_df['x'], prediction_df['y'])
-)
-
-prediction_gdf.set_crs(epsg=3006, inplace=True)
-
-# PREDICT KRIGING
-res_mean, res_std = predictor.predict(prediction_gdf, kriging_params)
-prediction_gdf["prediction_mean"] = res_mean
-prediction_gdf["prediction_std"] = res_std
-
-fig, axs = plt.subplots(1, 2, figsize=(10, 5))
-ax = axs[0]
-prediction_gdf.plot(column="prediction_mean", cmap="viridis", legend=True, ax=ax, markersize=9, marker="s")
-ax.set_title("Prediction mean")
-ax.set_xlabel("longitude")
-ax.set_ylabel("latitude")
-
-ax = axs[1]
-prediction_gdf.plot(column="prediction_std", cmap="magma", legend=True, ax=ax, markersize=9, marker="s")
-ax.set_title("Prediction standard deviation")
-ax.set_xlabel("longitude")
-ax.set_ylabel("latitude")
-fig.tight_layout()
-breakpoint()
-pass
+    krige.predict_for_season(
+        subset,
+        "air_temperature",
+        first_month_day,
+        last_month_day,
+        cross_validate=True,
+        show_plots=True
+    )
 
 
 ```

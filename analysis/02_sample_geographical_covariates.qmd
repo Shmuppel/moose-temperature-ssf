@@ -13,6 +13,7 @@ editor: visual
 library(tidyverse)
 packages <- c("amt", "lubridate", "sf", "terra", "glue", "tictoc")
 walk(packages, require, character.only = T)
+set.seed(20240307)
 ```
 
 ```{r}
@@ -58,9 +59,6 @@ for (f in covariate_files) {
       # For other files, just remove the .tif extension
       covariate_name <- tools::file_path_sans_ext(basename(f))
     }
-    
-    # TODO probably fix in QGIS / externally
-    if (covariate_name == "elevation") NAflag(r) <- 0
 
     covariates[[covariate_name]] <- r
     plot(r, main=covariate_name)
@@ -220,8 +218,8 @@ for (covariate in names(covariates)) {
 }
 ```
 
-## 5. Export annotated localisations to CSV
+## 5. Save annotated localisations as RData
 
 ```{r}
-write.csv(moose_random_steps, '../data/localisations/moose_random_steps.csv')
+save(moose_random_steps, file='../data/localisations/moose_random_steps.RData')
 ```

@@ -37,6 +37,8 @@ PARAMETER_MAPPING = {
     "wind": 4,
     "precipitation": 7,
     "snow_depth": 8,
+    "global_irradiance": 11,
+    "total_cloud_amount": 16
 }
 
 # Transformer for coordinates
@@ -96,11 +98,13 @@ def fetch_weather_stations() -> List[WeatherStation]:
 
     for parameter in json.loads(os.getenv('PARAMETERS')):
         response = SESSION.get(f"{ENTRY_POINT}/parameter/{PARAMETER_MAPPING[parameter]}.json").json()
+        print(parameter, PARAMETER_MAPPING[parameter])
         stations_per_parameter[parameter] = response
         n_stations += len(response["station"])
-
-    with alive_bar(n_stations, title=f"Seeding Weather Stations - {parameter}", bar="filling") as bar:
+        
+    with alive_bar(n_stations, title=f"Seeding Weather Stations", bar="filling") as bar:
         for parameter in stations_per_parameter.keys():
+            bar.text(parameter)
             for station in stations_per_parameter[parameter]["station"]:
                 try:
                     stations.append(build_weather_station_data(station, parameter))
