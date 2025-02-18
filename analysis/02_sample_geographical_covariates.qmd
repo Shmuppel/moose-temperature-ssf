@@ -2,6 +2,7 @@
 title: "sample_geographical_covariates"
 format: html
 editor: visual
+bibliography: ../references.bib
 ---
 
 ```{r}

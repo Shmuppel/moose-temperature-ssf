@@ -2,6 +2,7 @@
 title: "step_generation"
 format: html
 editor: visual
+bibliography: ../references.bib
 ---
 
 # 1 - Preprocess moose localisations
@@ -28,7 +29,7 @@ moose <- read.csv('../data/localisations/moose.csv', sep=';')
 columns_of_interest <- c(
   "Object_ID" = "animal_id",
   "Collar_ID" = "collar_id",
-  "LMT_date" = "date",
+  "GMT_date" = "date",
   "Longitude" = "x",
   "Latitude" = "y",
   "Temp" = "collar_temperature",
@@ -45,8 +46,8 @@ moose <- moose %>%
   arrange(animal_id) %>% # Sort by animal_id
   mutate(
     long = x, # we'll keep a copy of the WGS84 coords
-    lat = y, # we'll need latitude later in the analysis for some covariates
-    date = force_tz(ymd_hms(date), tzone="Europe/Stockholm")
+    lat = y, # we'll need latitude later in the analysis for calculation of GTT
+    date = with_tz(ymd_hms(date), tzone="Europe/Stockholm")
   ) %>%
   ungroup()
 ```

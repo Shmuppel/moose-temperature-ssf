@@ -23,7 +23,7 @@ walk(packages, require, character.only = T)
 set.seed(20240703) 
 Sys.setenv(TZ='Europe/Stockholm')
 readRenviron("../.env")
-source('./03_functions.r')
+source('./functions/03_functions.r')
 ```
 
 ```{r}
@@ -53,7 +53,7 @@ Let's define a function that gets us all the weather data and their weather stat
 get_weather_data <- function(start_date, end_date, parameter) {
   tbl_weather_data %>% 
     filter(
-      parameter == parameter & 
+      parameter == parameter,
       quality == 'G',
       date_local >= start_date,
       date_local <= end_date
@@ -78,6 +78,7 @@ get_weather_data <- function(start_date, end_date, parameter) {
       date = as.POSIXct(date, format="%Y-%m-%d %H:%M:%S", tz="Europe/Stockholm"),
       elevation = as.integer(elevation),  # Integer is enough precision for this use case
       month = month(date),  # Month number
+      year = year(date),
       day = yday(date),  # Day number from 1 - 365
       geom = st_as_sfc(geom, crs=st_crs(3006))
     ) %>%
@@ -85,7 +86,7 @@ get_weather_data <- function(start_date, end_date, parameter) {
     st_as_sf(.) %>%
     # Geometry is provided in WKT, so we need to retrieve the coords manually
     mutate(x = st_coordinates(.)[,1], y = st_coordinates(.)[,2]) %>%
-    # We'll also need latitude later to derive a covariate
+    # We'll also need latitude later to calculate GTT
     st_transform(., st_crs(4326)) %>%
     mutate(lat = st_coordinates(.)[,2]) %>%
     arrange(date) %>%
@@ -95,53 +96,62 @@ get_weather_data <- function(start_date, end_date, parameter) {
 
 ## 2. Regression
 
-Space-time regression is composed of two parts. The first part consists of predicting / catching the variation of our response variable through a linear regression model (though, this approach could be extend to use a GLM too). For our regression model we'll follow methodologies adapted from [@spatio-t] and [@sekulic2020]. We'll use elevation derived from a Swedish DEM, and geometric temperature trend (GTT). To showcase the process this notebook goes through the regression and kriging step by step.
+Space-time regression is composed of two parts. The first part consists of predicting / catching the variation of our response variable through a regression model. For our regression model we'll follow methodologies adapted from [@spatio-t] and [@sekulic2020]. We'll use elevation derived from a Swedish DEM, and geometric temperature trend (GTT). To showcase the process this notebook goes through the regression and kriging step by step.
 
 ### 2.1 Data exploration
 
 Let's first retrieve the data.
 
 ```{r}
-start_date <- as.POSIXct(glue("2012-01-23 00:00:00"), tz="Europe/Stockholm")
-end_date <- as.POSIXct(glue("2012-01-24 00:00:00"), tz="Europe/Stockholm")
-weather_data <- get_weather_data(start_date, end_date, "air_temperature")
+weather_data <- data.frame()
+for (year in unique(moose_random_steps$year)) {
+  start_date <- as.POSIXct(glue("{year}-06-01 00:00:00"), tz="Europe/Stockholm")
+  end_date <- as.POSIXct(glue("{year}-09-01 00:00:00"), tz="Europe/Stockholm")
+  yearly_weather_data <- get_weather_data(start_date, end_date, "air_temperature")
+  weather_data <- bind_rows(weather_data, yearly_weather_data)
+}
+n_stations <- length(unique(weather_data$station_id))
+weather_data$year <- as.factor(weather_data$year)  # We'll need this later
 ```
 
 ```{r}
 # Check duplicates, generally there are none, but for our data there is a single entry that is duplicated
-which(duplicated(weather_data[,c("station_id", "x", "y","date")]))
+duped <- which(duplicated(weather_data[,c("station_id", "x", "y","date")]))
+print(duped)
+weather_data <- weather_data[-duped,]
 ```
 
 ```{r}
-create_violin_plot <- function(data, variable, y_label) {
-  ggplot(data, aes(y = .data[[variable]], x = "")) +
-    geom_violin(fill = "lightblue", alpha = 0.5) +
-    geom_boxplot(width = 0.2, alpha=0.5, outlier.shape = NA, fill="transparent") +
-    labs(y = y_label, x = "") +
-    theme_minimal()
-}
+plot1 <- ggplot(weather_data) +
+  geom_boxplot(aes(y = value, fill = factor(year)), 
+               alpha = 0.8, outlier.alpha = 0.008, 
+               position = position_dodge(1)) +
+  scale_fill_viridis_d(option = "magma", name = "Year") +
+  theme_minimal() +
+  labs(y = "Temperature (°C)", title = "Boxplots of Temperatures per Year") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank())
 
-# Create plots for temperature and elevation
-plot1 <- create_violin_plot(weather_data, "value", "Temperature (°C)")
-plot2 <- create_violin_plot(weather_data, "elevation", "Elevation (m)")
+plot2 <- ggplot(weather_data %>% distinct(station_id, elevation)) +
+  geom_histogram(aes(x = elevation), fill = "#FCA636FF", alpha = 0.8) +
+  theme_minimal() +
+  labs(x = "Elevation", y = "Amount of Weather Stations", 
+       title = glue("Histogram of Weather Station Elevation (n={n_stations})"))
 
-# Combine plots using patchwork
-combined_plot <- plot1 + plot2 + plot_layout(ncol = 2)
+combined_plot <- plot1 + plot2 + plot_layout(nrow = 2, guides = "collect")
 
-# Display the combined plot
 print(combined_plot)
 ```
 
 The following plot shows the temperature readings animated over a couple of days. As you can see our data is not temporally regular for all weather stations. Some weather stations update every hour, some every 3 hours.
 
 ```{r}
-plot_data <- weather_data %>% filter(date < start_date + days(3))
-plot_data$hour_since_start <- as.numeric(difftime(plot_data$date, start_date, units = "hours"))
+start_date <- min(weather_data$date)
+plot_data <- weather_data %>% filter(date <= start_date + days(3))
 plot_data <- st_as_sf(plot_data, coords=c('x','y'))
 
 p <- ggplot(plot_data) + 
   geom_sf(aes(color = value, group=station_id)) +
-  scale_color_viridis_c(name = "Temperature (°C)", option = "plasma") +
+  scale_color_viridis_c(name = "Temperature (°C)", option = "magma") +
   labs(title = "Temperature over Time",
        subtitle = "Time: {frame_time}",
        x = "Long", y = "Lat") + 
@@ -149,7 +159,7 @@ p <- ggplot(plot_data) +
   transition_time(date) +
   enter_fade() + exit_fade()
 
-animate(p, renderer=gifski_renderer(), duration = 25, fps=30)
+gganimate::animate(p, renderer=gifski_renderer(), duration = 25, fps=30)
 ```
 
 ## 2.2 Modelling
@@ -160,16 +170,9 @@ GTT is the only co variate that is also temporally dynamic, and can be calculate
 weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable="mean")
 ```
 
-We'll apply a Yeo-Johnson power transformation before our linear regression. This helps stabilize the variance in our data. It's especially useful when kriging winter temperatures as those tend to have extreme negative outliers.
-
 ```{r}
-power_transform <- yeojohnson(weather_data$value)
-weather_data$value_trans <- predict(power_transform) 
-```
-
-```{r}
-linear_regression <- lm(value_trans ~ elevation + gtt, data=weather_data)
-summary(linear_regression)
+regression_model <- lm(value ~ elevation + gtt + year, data=weather_data)
+summary(regression_model)
 ```
 
 As we can see, a simple linear regression is not great at predicting temperature. Nevertheless capturing this variation will prove very useful as we continue with the spatial-temporal Kriging step. For that we'll be using the residuals of this model.
@@ -177,30 +180,63 @@ As we can see, a simple linear regression is not great at predicting temperature
 Lets double-check that our residuals are normally distributed:
 
 ```{r}
-plot(linear_regression, which=2)
+plot(regression_model, which=2)
 ```
 
+We see temperature tends to decrease as we increase in elevation and GTT. We'll use this linear model to fit sample and experimental semi-variograms to residuals of its prediction.
+
 ```{r}
-names(linear_regression$coefficients) <- c("Intercept", "elevation", "gtt")
-linear_regression$coefficients
+save(regression_model, file='../data/regression_model.RData')
 ```
 
-We see temperature tends to decrease as we increase in elevation and GTT. We'll use this linear model and fit a variogram to the residuals. Let's add the residuals of our earlier model to the data.
+We'll also need the prediction of the model (in combination with the kriged prediction) in order to derive the temperature estimation. It's easiest to predict each moose localisation now.
 
 ```{r}
-weather_data$res <- resid(linear_regression)
+build_pred_steps <- function(data, time_col, elev_col) {
+  pred <- data
+  pred$day <- yday(data[[time_col]])
+  pred$year <- year(data[[time_col]])
+  pred$year <- factor(pred$year, levels = levels(weather_data$year))
+  pred$gtt <- temp_geom(pred$day, data$lat, variable = "mean")
+  pred$elevation <- data[[elev_col]]
+  return(pred)
+}
+
+# Build prediction datasets for start and end steps
+pred_steps_start <- build_pred_steps(moose_random_steps, "t1_", "elevation_start")
+pred_steps_end <- build_pred_steps(moose_random_steps, "t2_", "elevation_end")
+
+# Use these datasets in the regression predictions
+moose_random_steps$res_start <- unname(predict(regression_model, pred_steps_start))
+moose_random_steps$res_end <- unname(predict(regression_model, pred_steps_end))
+
+# Save the updated object
+save(moose_random_steps, file = "../data/localisations/moose_random_steps.RData")
+
+rm(pred_steps_start, pred_steps_end)
 ```
 
 ## 3. Spatial Temporal Regression Kriging
+
+### 3.1 Making a test data set
+
+Kriging using a data set of millions or rows would take a really long time. Therefore we split our data into week batches when predicting temperature at localisations. Here we'll walk through the process.
+
+```{r}
+start_date <- as.POSIXct("2017-06-01 00:00:00", tz="Europe/Stockholm")
+end_date <- as.POSIXct("2017-06-08 00:00:00", tz="Europe/Stockholm")
+weather_data <- get_weather_data(start_date, end_date, "air_temperature")
+weather_data <- as.data.frame(weather_data)
+```
 
 ### 3.1 Data preparation
 
 We'll transform our data into a `STDF` (Space-Time Data-Frame) from the package `spacetime`. The package has a somewhat steep learning curve, but examples are provided in the [spacetime vignette](https://cran.r-project.org/web/packages/spacetime/vignettes/jss816.pdf). Another good resource is the [sftime demo](https://rdrr.io/cran/gstat/src/demo/sftime.R) of `gstat`.
 
 ```{r}
-# first remove the geom as it will interfere with the other data processing
-weather_data <- weather_data %>% st_drop_geometry()  # leaves us with a tibble
-weather_data <- as.data.frame(weather_data)
+weather_data$year <- factor(year, levels=regression_model$xlevels$year)
+weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable="mean")
+weather_data$res <- weather_data$value - unname(predict(regression_model, weather_data))
 ```
 
 ```{r}
@@ -277,7 +313,7 @@ linear_st_anisotropy <- estiStAni(emperical_variogram, c(100000,400000), t.range
 sum_metric_model <- vgmST("sumMetric",
                           space=vgm(psill=16, "Sph", range=550000, nugget=1),
                           time= vgm(psill=7, "Sph", range=10, nugget=1), 
-                          joint= vgm(psill=15, "Sph",  range=50000, nugget=1),
+                          joint= vgm(psill=15, "Sph",  range=500000, nugget=1),
                           stAni=linear_st_anisotropy)
 
 fit_sum_metric_model <- fit.StVariogram(
@@ -313,23 +349,28 @@ TODO
 
 TODO
 
-## 4.1 Sampling weather covariates at moose steps
+## 4 Sampling weather covariates at moose steps
 
-Next we can predict some moose steps. As we'll be doing this on large scale with multi-threading, some helper functions have been written. The `03_functions.r` file contains functions that combine all of the essentials that have been carried out so far. It also contains a small helper function to get us started with moose steps.
+Next we can predict some moose steps. As we'll be doing this on large scale with multi-threading, some helper functions have been written. The `03_functions.r` file contains functions that combine all of the essentials that have been carried out so far. It also contains a small helper function to get us started with moose steps. We can either predict the temperature at the start step or the end step, here we'll show an example with end steps.
 
 ```{r}
 # The functions shapes the data for us and adds GTT
-localisations <- prepare_localisations(
-  moose_random_steps %>% filter(t1_ >= start_date, t2_ <= end_date)
+localisations <- prepare_end_steps(
+  moose_random_steps %>% 
+    filter(
+      t2_ > start_date, 
+      t2_ < start_date + days(1)
+    )
 )
 localisations <- as.data.frame(localisations)
+
 # krigeST wants a ST object, lets make one
 moose_sf <- st_as_sf(localisations, coords = c("x", "y"), crs = CRS('epsg:3006'))
 spatial_points <- as(moose_sf, "Spatial")
 moose_st <- stConstruct(
   localisations, 
   space = c("x", "y"), 
-  time  = "t1_", 
+  time  = "t2_", 
   spatial_points,
   crs = CRS('epsg:3006')
 )
@@ -342,7 +383,7 @@ kriging_object <- krigeST(
   moose_st,
   sum_metric_model, 
   maxdist=100000,
-  nmax=5, 
+  nmax=10, 
   computeVar = T
 )
 toc()
@@ -351,18 +392,22 @@ toc()
 Next lets transform our prediction into a temperature estimate. We do this by combining the prediction of the linear model, to the prediction of the kriging. Remember that we initially applied a power transform, so we make sure to revert that.
 
 ```{r}
-pred_linear_model <- predict(linear_regression, localisations)
 pred_kriging <- kriging_object@data$var1.pred
-pred_combined <- pred_linear_model + pred_kriging
-
-transformed_prediction <- predict(power_transform, newdata = pred_combined, inverse = TRUE)
+pred_combined <- pred_kriging + localisations$res_end
 ```
 
 ```{r}
-summary(transformed_prediction)
+print("Real Summary (Note: All of Sweden)")
+summary(weather_data$value)
+print("Reg. Kriged Summary")
+summary(pred_combined)
+print("Collar Temperature Summary")
+summary(localisations$collar_temperature)
 ```
 
-## 4.2 Parallelisation
+### 4.1. Using Parallelisation
+
+Below is a separate piece of code that can be used to annotate all the steps in our `moose_random_steps` object with temperature data. The run-time of this will be rather significant, so take care not to run it accidentally.
 
 ```{r}
 #| label: packages
@@ -378,26 +423,28 @@ walk(packages, require, character.only = T)
 set.seed(20240703) 
 Sys.setenv(TZ='Europe/Stockholm')
 readRenviron("../.env")
-source('./03_functions.r')
+source('./functions/03_functions.r')
 ```
 
 ```{r}
 load('../data/week_batches.RData')
 ```
 
+Create a list of week batches. Each batch will include:
+
+-   week_id: a label for the week (e.g. "2024-03-11")
+
+-   moose_data: subset of moose_random_steps that have either t1\_ or t2\_ falling in the main window
+
+-   weather_data: weather data for the extended window
+
 ```{r}
 # We use all times from both start and end steps.
-all_times <- c(moose_random_steps$t1_, moose_random_steps$t2_)
+all_times <- c(moose_random_steps$t1_)
 # Define week boundaries using floor_date. (week_start = 1 means Monday)
 unique_week_starts <- sort(unique(floor_date(all_times, unit = "week", week_start = 1)))
-buffer_hours <- 2
+buffer_hours <- 3
 
-# Create a list of week batches. Each batch will include:
-#   - week_id: a label for the week (e.g. "2024-03-11")
-#   - main_start, main_end: the main prediction window for that week
-#   - extended_start, extended_end: main window extended by buffer_hours on each side
-#   - moose_data: subset of moose_random_steps that have either t1_ or t2_ falling in the main window
-#   - weather_data: weather data for the extended window (queried once)
 week_batches <- lapply(unique_week_starts, function(week_start) {
   # Define main window: from the week start to week start + 7 days - 1 second.
   main_start <- week_start
@@ -406,19 +453,20 @@ week_batches <- lapply(unique_week_starts, function(week_start) {
   extended_start <- main_start - hours(buffer_hours)
   extended_end   <- main_end + hours(buffer_hours)
   
-  # Subset moose data: include any row if either t1_ or t2_ falls within extended window.
-  moose_subset <- moose_random_steps %>% filter(t1_ >= main_start & t1_ <= main_end) 
-  if (nrow(moose_subset) == 0) next
+  # Subset moose data: include any row if either t1_ falls within extended window.
+  moose_subset <- moose_random_steps %>% 
+    filter(t1_ >= main_start & t1_ < main_end) 
+  if (nrow(moose_subset) == 0) return()
   
   # Pre-fetch weather data for this week’s extended window.
   weather_data <- get_weather_data(extended_start, extended_end, "air_temperature")
+  # Add residuals to weather data
+  weather_data$year <- factor(weather_data$year, levels=regression_model$xlevels$year)
+  weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable="mean")
+  weather_data$res <- weather_data$value - unname(predict(regression_model, weather_data))
   
   list(
     week_id        = as.character(week_start),
-    main_start     = main_start,
-    main_end       = main_end,
-    extended_start = extended_start,
-    extended_end   = extended_end,
     moose_data     = moose_subset,
     weather_data   = weather_data
   )
@@ -428,34 +476,28 @@ save(week_batches, file='../data/week_batches.RData')
 ```
 
 ```{r}
-# ---- STEP 2: Define a child function to process one week batch ----
 process_week_batch <- function(batch) {
-  # Extract the batch information
-  week_id        <- batch$week_id
-  main_start     <- batch$main_start
-  main_end       <- batch$main_end
-  extended_start <- batch$extended_start
-  extended_end   <- batch$extended_end
-  moose_data     <- batch$moose_data
-  weather_data   <- batch$weather_data
-  print(week_id)
-  cat("Building Kriging Model")
+  week_id          <- batch$week_id
+  moose_data       <- batch$moose_data
+  weather_data     <- batch$weather_data
+  
+  logger(glue("Processing {week_id}"))
+  logger(glue("Building Kriging Model"))
   kriging_model <- build_weather_kriging_model(weather_data, "air_temperature")
   
-  cat("Predicting start steps")
+  logger(glue("Predicting start steps"))
   start_steps <- prepare_start_steps(moose_data)
   unique_start_steps <- start_steps %>% distinct(
-    x1_, y1_, t1_, x, y,  time, animal_id, elevation, gtt)
+    x, y, time, year, animal_id, res,
+    x1_, y1_, t1_
+  )
   unique_start_steps$temperature_start <- predict_weather_at_localisations(
     unique_start_steps, 
     kriging_model,
     maxdist = 200000,
     nmax = 5
   )
-  unique_start_steps <- unique_start_steps %>% 
-    select("x1_","y1_", "t1_", "animal_id", "temperature_start")
-  
-  cat("Predicting end steps")
+  logger(glue("Predicting end steps"))
   # Predict for end steps (each row is unique)
   end_steps <- prepare_end_steps(moose_data)
   end_steps$temperature_end <- predict_weather_at_localisations(
@@ -464,72 +506,38 @@ process_week_batch <- function(batch) {
     maxdist = 200000, 
     nmax = 5
   )
+  
+  unique_start_steps <- unique_start_steps %>% 
+    select("x1_", "y1_", "t1_", "animal_id", "temperature_start")
   end_steps <- end_steps %>% 
-    select("x2_","y2_", "t2_", "animal_id", "temperature_end")
+    select("x2_", "y2_", "t2_", "animal_id", "temperature_end")
   
-  
-  cat("Adding predictions to moose data")
+  logger(glue("Adding predictions to moose data"))
   moose_data <- left_join(
-    moose_data,
-    unique_start_steps,
+    moose_data, unique_start_steps,
     by = c("x1_", "y1_", "t1_", "animal_id")
   )
   moose_data <- left_join(
-    moose_data, 
-    end_steps,
+    moose_data, end_steps,
     by = c("x2_", "y2_", "t2_", "animal_id")
   )
   
-  print(head(moose_data,5)[, c("t1_", "temperature_start", "temperature_end", "collar_temperature")])
-  return(moose_data)
+  write_result(moose_data)
+  
+  logger(paste0(
+    as.character(moose_data[1, "t1_"]), "\n",
+    moose_data[1, "temperature_start"], "\n",
+    moose_data[1, "temperature_end"], "\n",
+    moose_data[1, "collar_temperature"]))
+  
+  logger(glue("Finished processing {week_id}"))
 }
 ```
 
-```{r}
-# ---- STEP 3: Process each week batch in parallel using parLapply ----
-cl <- makeCluster(6, outfile='03_parallel_log.txt') 
-
-# Export necessary objects and functions to the cluster.
-clusterExport(
-  cl, varlist = c(
-    "prepare_start_steps", 
-    "prepare_end_steps",
-    "build_weather_kriging_model", 
-    "predict_weather_at_localisations",
-    "process_week_batch"
-  ), envir = environment())
-
-# Load libraries on the cluster nodes.
-clusterEvalQ(cl, {
-  library(dplyr)
-  library(lubridate)
-  library(sf)
-  library(gstat)
-  library(spacetime)
-  library(meteo)
-  library(bestNormalize)
-  library(sp)
-})
-
-results_list <- parLapply(cl, week_batches, process_week_batch)
-stopCluster(cl)
-
-# Results
-final_results <- do.call(rbind, results_list)
-head(final_results)
-
-```
+The below code chunk runs the palatalization magic, warning it will take a day to run!
 
 ```{r}
-backend <- start_backend(cores = 6, cluster_type = "psock")
-
-export(backend,c(
-  "prepare_start_steps", 
-  "prepare_end_steps",
-  "build_weather_kriging_model", 
-  "predict_weather_at_localisations",
-  "process_week_batch"
-),environment())
+backend <- start_backend(cores = 3, cluster_type = "fork")
 
 evaluate(backend, {
   library(dplyr)
@@ -538,15 +546,58 @@ evaluate(backend, {
   library(gstat)
   library(spacetime)
   library(meteo)
-  library(bestNormalize)
   library(sp)
+  library(glue)
 })
 
-set_option("progress_log_path", "/Users/niels/Projects/moose-temperature-ssf/analysis/03_parallel_log.txt")
+# Function to create a result writer (CSV appender)
+make_result_writer <- function(path, ext = "csv", mode = "w") {
+    pid <- Sys.getpid()
+    full_path <- paste0(path, "_", pid, ".", ext)
+    conn_result <<- file(full_path, open = mode)
+    
+    write_result <<- function(input) {
+        write.table(
+          input, conn_result, sep = ";", row.names = FALSE, 
+          col.names = F, append = T
+        )
+        flush(conn_result)
+    }
+}
 
-configure_bar(type = "modern", format = ":spin [:bar] :current/:total :percent [:elapsedfull /:eta]")
+# Function to create a logger (writes text logs)
+make_logger <- function(path, ext = "txt", mode = "w") {
+    pid <- Sys.getpid()
+    full_path <- paste0(path, "_", pid, ".", ext)
+    conn_log <<- file(full_path, open = mode)
+    
+    logger <<- function(input) {
+        writeLines(input, conn_log)
+        flush(conn_log)
+    }
+}
 
-results <- par_lapply(backend, week_batches, process_week_batch)
+export(backend,c(
+  "prepare_start_steps", 
+  "prepare_end_steps",
+  "build_weather_kriging_model", 
+  "predict_weather_at_localisations",
+  "process_week_batch",
+  "make_result_writer", 
+  "make_logger"
+),environment())
+
+evaluate(backend, make_logger("log/worker"))
+evaluate(backend, make_result_writer("03_results/result"))
+
+# Configure the progress bar
+configure_bar(
+  type = "modern", 
+  format = ":spin [:bar] :current/:total :percent [:elapsedfull /:eta]"
+)
+
+options(cli.ignore_unknown_rstudio_theme = TRUE)
+par_lapply(backend, week_batches, process_week_batch)
 
 stop_backend(backend)
 ```
