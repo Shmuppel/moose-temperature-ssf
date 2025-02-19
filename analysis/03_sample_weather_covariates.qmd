@@ -467,7 +467,7 @@ week_batches <- lapply(unique_week_starts, function(week_start) {
   weather_data$res <- weather_data$value - unname(predict(regression_model, weather_data))
   
   moose_subset <- moose_subset %>% select(
-    animal_id, step_id_, x1_, x2_, y1_, y2_, t1_, t2_, year, res_start, res_end)
+    id, animal_id, step_id_, x1_, x2_, y1_, y2_, t1_, t2_, year, res_start, res_end)
   weather_data <- weather_data %>% select(station_id, date, year, x, y, value, res)
   
   list(

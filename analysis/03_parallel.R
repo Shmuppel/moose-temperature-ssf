@@ -23,10 +23,6 @@ walk(packages, require, character.only = TRUE)
 set.seed(20240703) 
 Sys.setenv(TZ = 'Europe/Stockholm')
 
-# Load week batches data
-load('../data/week_batches.RData')
-
-
 # --------------------------
 # 2. Weather Kriging Functions
 # --------------------------
@@ -274,6 +270,8 @@ make_logger <- function(path, ext = "txt", mode = "w") {
 # --------------------------
 
 main <- function() {
+  # Load week batches data
+  load('data/week_batches.RData')
   # Start the parallel backend (adjust cores as needed)
   backend <- start_backend(cores = 1, cluster_type = "fork")
   
@@ -301,7 +299,6 @@ main <- function() {
   ), environment())
   
   evaluate(backend, make_logger("log/worker"))
-  
   # Configure progress bar settings
   configure_bar(
     type   = "modern", 
@@ -312,11 +309,13 @@ main <- function() {
   options(stop_forceful = TRUE)
   
   # Process batches in parallel
-  results <- par_lapply(backend, week_batches, process_batch)
+  results <- par_lapply(backend, week_batches[1], process_batch)
+  
+  write.csv(results, './03_results.csv', sep=';')
   
   # Stop the backend
   stop_backend(backend)
 }
 
 # Uncomment the following line to run the main function when executing the script
-# main()
+main()
