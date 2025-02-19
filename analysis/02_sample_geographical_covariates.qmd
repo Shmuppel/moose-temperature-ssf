@@ -119,6 +119,13 @@ print(glue(
 ))
 ```
 
+```{r}
+# Only keep 15 steps
+temp <- as.data.frame(moose_random_steps)
+temp <- temp %>% dplyr::group_by(animal_id, step_id_) %>% dplyr::slice_sample(n=15)
+moose_random_steps <- moose_random_steps[moose_random_steps$id %in% temp$id,]
+```
+
 ### 2.2 Update landuse covariates with Felling data
 
 ```{r}

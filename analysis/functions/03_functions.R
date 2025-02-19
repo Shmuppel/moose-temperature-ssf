@@ -36,10 +36,10 @@ build_weather_kriging_model <- function(weather_data, parameter = "air_temperatu
     
     # Define the sum-metric variogram model (with parameters from visual inspection)
     sum_metric_model <- vgmST("sumMetric",
-                              space = vgm(psill = 16, "Sph", range = 550000, nugget = 1),
-                              time  = vgm(psill = 7,  "Sph", range = 10,     nugget = 1), 
-                              joint = vgm(psill = 15, "Sph", range = 50000,  nugget = 1),
-                              stAni = linear_st_anisotropy)
+                              space=vgm(psill=6, "Sph", range=550000, nugget=1),
+                              time= vgm(psill=30, "Sph", range=10, nugget=1), 
+                              joint= vgm(psill=4, "Sph",  range=50000, nugget=1),
+                              stAni=linear_st_anisotropy)
     
     # Fit the sum-metric model to the empirical variogram
     fit_sum_metric_model <- fit.StVariogram(
@@ -49,6 +49,12 @@ build_weather_kriging_model <- function(weather_data, parameter = "air_temperatu
       fit.method = 8
     )
     attr(fit_sum_metric_model, "temporal unit") <- "hours"
+    
+    #file_name = paste0('03_variograms/', weather_stfdf@endTime[1], ".png")
+    #agg_png(file_name)
+    #plot(empirical_variogram, fit_sum_metric_model, wireframe=T, all=T, scales=list(arrows=F))
+    #dev.off()
+    
     return(fit_sum_metric_model)
   }
   
@@ -139,4 +145,45 @@ prepare_end_steps <- function(df) {
     ) %>%
     arrange(time)
   return(df)
+}
+
+# MAIN
+main <- function() {
+  backend <- start_backend(cores = 1, cluster_type = "fork")
+  
+  evaluate(backend, {
+    library(dplyr)
+    library(lubridate)
+    library(sf)
+    library(gstat)
+    library(spacetime)
+    library(meteo)
+    library(sp)
+    library(glue)
+  })
+  
+  export(backend,c(
+    "prepare_start_steps", 
+    "prepare_end_steps",
+    "build_weather_kriging_model", 
+    "predict_weather_at_localisations",
+    "process_batch",
+    "make_result_writer", 
+    "make_logger"
+  ),environment())
+  
+  evaluate(backend, make_logger("log/worker"))
+  evaluate(backend, make_result_writer("03_results/result"))
+  
+  # Configure the progress bar
+  configure_bar(
+    type = "modern", 
+    format = ":spin [:bar] :current/:total :percent [:elapsedfull /:eta]"
+  )
+  
+  options(cli.ignore_unknown_rstudio_theme = TRUE)
+  options(stop_forceful = TRUE)
+  par_lapply(backend, week_batches, process_batch)
+  
+  stop_backend(backend)
 }

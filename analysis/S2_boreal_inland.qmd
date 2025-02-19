@@ -1,0 +1,597 @@
+---
+title: "04_harmonic_covariates"
+format: html
+editor: visual
+bibliography: ../references.bib
+---
+
+```{r}
+#| label: packages
+#| code-summary: "Loading packages"
+#| message: false
+#| warning: false
+
+library(tidyverse)
+packages <- c("dplyr", "data.table", "amt", "terra", "sf", "sp", "ggspatial", "patchwork")
+walk(packages, require, character.only = T)
+```
+
+```{r}
+#| code-summary: "Setting seed and loading styles"
+#| message: false
+#| warning: false
+set.seed(20240703) 
+source('./util/styles.R')
+```
+
+## Step Exploration
+
+```{r}
+#| code-summary: "Loading layer files"
+#| message: false
+#| warning: false
+STRATA <- "boreal coast"
+all_strata <- st_read('../data/strata/strata.gpkg')
+strata <- all_strata[all_strata$name == STRATA, ]
+
+landuse <- rast('../data/geographical_covariates/landuse_2018.tif')
+elevation <- rast('../data/geographical_covariates/elevation.tif')
+
+landuse <- crop(landuse, strata, mask=T)
+elevation <- crop(elevation, strata, mask=T)
+```
+
+```{r}
+#| code-summary: "Loading moose steps"
+load('../data/localisations/moose.RData')
+moose <- moose %>% filter(strata == STRATA)
+```
+
+```{r}
+# Overview of which strata plot
+overview_plot <- ggplot() +
+  layer_spatial(all_strata, fill = "gray80", color = "black", alpha = 0.5) +
+  layer_spatial(strata, fill = "red", color = "black", size = 1) +
+  labs(title = "Overview of Strata", subtitle = paste("Selected Strata:", STRATA)) +
+  theme_minimal()
+
+# Strata landuse plot
+landuse_downsampled <- aggregate(landuse, fact = 50, fun = "modal", cores=1)
+landuse_plot <- ggplot() + 
+  layer_spatial(strata, fill = "transparent") +
+  layer_spatial(landuse_downsampled) + 
+  theme_minimal() +
+  landuse_legend_fill
+
+combined_plot <- overview_plot + landuse_plot
+print(combined_plot)
+```
+
+```{r}
+true_steps <- st_as_sf(moose[moose$case_ == 1,], coords=c("x1_", "y1_"), crs=st_crs(3006))
+# Calculate the extent of the localizations
+localisation_extent <- st_bbox(true_steps)  # Bounding box of the localizations
+extent_sf <- st_as_sfc(localisation_extent)  # Convert bbox to an sf object
+elevation <- crop(elevation, as.polygons(ext(localisation_extent), crs="EPSG:3006"), mask=T)
+
+# Main plot: zoomed-in view of the localizations
+main_plot <- ggplot(elevation, aes(x, y)) +
+  # Strata
+  annotation_spatial(strata, fill = "transparent", color = black) +  # Strata in the background
+  coord_sf(xlim = c(localisation_extent["xmin"], localisation_extent["xmax"]),
+           ylim = c(localisation_extent["ymin"], localisation_extent["ymax"]),
+           expand = F) +
+  
+  # Elevation
+  geom_relief(aes(z = elevation)) +
+  geom_spatraster(
+    data = elevation, inherit.aes = FALSE,
+    aes(alpha = after_stat(value))
+  ) +
+  # Localizations
+  layer_spatial(true_steps, alpha = 0.5, color=blue) +
+  
+  # Scales
+  scale_fill_cross_blended_c(breaks = seq(0, 400, 50)) +
+  scale_alpha(range = c(1, 0.25)) +
+  annotation_scale() +
+  theme_minimal() +
+  theme(panel.grid = element_blank()) + 
+  guides(alpha = "none", fill = guide_legend(reverse = TRUE)) + 
+  labs(title = "Localizations", x = "Longitude", y = "Latitude")
+
+# Inset map: overview of strata with localization extent highlighted
+inset_plot <- ggplot() +
+  layer_spatial(strata, fill = "gray80", color = black) +  # All strata
+  geom_sf(data = extent_sf, fill = NA, color = red, size = 5) +  # Highlight extent
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.margin = margin(0, 0, 0, 0, "cm"))
+
+# Combine the main plot and inset map
+combined_plot <- main_plot +
+  inset_element(
+    inset_plot, 
+    left = -0.75, bottom = 0.5, right = 0.99, top = 0.99, 
+    align_to = "panel"
+  ) 
+
+# Display the plot
+print(combined_plot)
+```
+
+## Step Selection Functions
+
+### Preparing and Scaling Data
+
+::: {#Preparing}
+### 0p
+
+```{r}
+# Transmute all the columns that need to be scaled
+unscaled_model_data <- moose %>% transmute(
+  temp_start = temperature_start,
+  temp_end = temperature_end,
+  
+  dist_to_water_end = distance_to_water_end,
+  dist_to_water_end_temp = dist_to_water_end * temp_end,
+  ruggedness_end = ruggedness_end,
+  
+  sl_ = sl_,
+  log_sl_ = log(sl_),
+  cos_ta_ = cos(ta_)
+)
+
+scaled_model_data <- scale(unscaled_model_data)
+# save the scaling values to recover the natural scale of the coefficients
+mean_vals <- attr(scaled_model_data, "scaled:center")
+sd_vals <- attr(scaled_model_data, "scaled:scale")
+
+scaling_attributes_0p <- data.frame(
+  variable = names(unscaled_model_data), 
+  mean = mean_vals, 
+  sd = sd_vals
+)
+
+moose_data_scaled_0p <- data.frame(
+  animal_id = moose$animal_id,  
+  step_id = moose$step_id_, 
+  case = moose$case_,
+  
+  landuse_end = moose$landuse_end,
+  scaled_model_data
+)
+```
+
+### 1p
+
+```{r}
+# Transmute all the columns that need to be scaled
+unscaled_model_data <- moose %>% transmute(
+  # Don't do harmonics for temperature as it correlates with day
+  temp_start = temperature_start,
+  temp_end = temperature_end,
+  
+  dist_to_water_end = distance_to_water_end,
+  dist_to_water_end_s1 = dist_to_water_end * hour_s1_t2,
+  dist_to_water_end_c1 = dist_to_water_end * hour_c1_t2,
+  dist_to_water_end_temp_end = distance_to_water_end * temp_end,
+  
+  ruggedness_end = ruggedness_end,
+  ruggedness_end_s1 = ruggedness_end * hour_s1_t2,
+  ruggedness_end_c1 = ruggedness_end * hour_c1_t2,
+  
+  sl_ = sl_,
+  sl_s1 = sl_ * hour_s1_t2,
+  sl_c1 = sl_ * hour_c1_t2,
+  
+  log_sl_ = log(sl_),
+  log_sl_s1 = log_sl_ * hour_s1_t2,
+  log_sl_c1 = log_sl_ * hour_c1_t2,
+  
+  cos_ta_ = cos(ta_),
+  cos_ta_s1 = cos_ta_ * hour_s1_t2,
+  cos_ta_c1 = cos_ta_ * hour_c1_t2
+)
+
+scaled_model_data <- scale(unscaled_model_data)
+# save the scaling values to recover the natural scale of the coefficients
+mean_vals <- attr(scaled_model_data, "scaled:center")
+sd_vals <- attr(scaled_model_data, "scaled:scale")
+
+scaling_attributes_1p <- data.frame(
+  variable = names(unscaled_model_data), 
+  mean = mean_vals, 
+  sd = sd_vals
+)
+
+moose_data_scaled_1p <- data.frame(
+  animal_id = moose$animal_id,  
+  step_id = moose$step_id_, 
+  case = moose$case_,
+  hour_s1_t2 = moose$hour_s1_t2,
+  hour_c1_t2 = moose$hour_c1_t2,
+  
+  landuse_end = moose$landuse_end,
+  scaled_model_data
+)
+```
+
+### 2p
+
+```{r}
+unscaled_model_data <- moose %>% transmute(
+  # Don't do harmonics for temperature as it correlates with day
+  temp_start = temperature_start,
+  temp_end = temperature_end,
+  
+  dist_to_water_end = distance_to_water_end,
+  dist_to_water_end_s1 = dist_to_water_end * hour_s1_t2,
+  dist_to_water_end_s2 = dist_to_water_end * hour_s2_t2,
+  dist_to_water_end_c1 = dist_to_water_end * hour_c1_t2,
+  dist_to_water_end_c2 = dist_to_water_end * hour_c2_t2,
+  dist_to_water_end_temp_end = distance_to_water_end * temp_end,
+  
+  ruggedness_end = ruggedness_end,
+  ruggedness_end_s1 = ruggedness_end * hour_s1_t2,
+  ruggedness_end_s2 = ruggedness_end * hour_s2_t2,
+  ruggedness_end_c1 = ruggedness_end * hour_c1_t2,
+  ruggedness_end_c2 = ruggedness_end * hour_c2_t2,
+  
+  sl_ = sl_,
+  sl_s1 = sl_ * hour_s1_t2,
+  sl_s2 = sl_ * hour_s2_t2,
+  sl_c1 = sl_ * hour_c1_t2,
+  sl_c2 = sl_ * hour_c2_t2,
+  
+  log_sl_ = log(sl_),
+  log_sl_s1 = log_sl_ * hour_s1_t2,
+  log_sl_s2 = log_sl_ * hour_s2_t2,
+  log_sl_c1 = log_sl_ * hour_c1_t2,
+  log_sl_c2 = log_sl_ * hour_c2_t2,
+  
+  cos_ta_ = cos(ta_),
+  cos_ta_s1 = cos_ta_ * hour_s1_t2,
+  cos_ta_s2 = cos_ta_ * hour_s2_t2,
+  cos_ta_c1 = cos_ta_ * hour_c1_t2,
+  cos_ta_c2 = cos_ta_ * hour_c2_t2
+)
+
+scaled_model_data <- scale(unscaled_model_data)
+# save the scaling values to recover the natural scale of the coefficients
+mean_vals <- attr(scaled_model_data, "scaled:center")
+sd_vals <- attr(scaled_model_data, "scaled:scale")
+
+scaling_attributes_2p <- data.frame(
+  variable = names(unscaled_model_data), 
+  mean = mean_vals, 
+  sd = sd_vals
+)
+
+moose_data_scaled_2p <- data.frame(
+  animal_id = moose$animal_id,  
+  step_id = moose$step_id_, 
+  case = moose$case_,
+  hour_s1_t2 = moose$hour_s1_t2,
+  hour_s2_t2 = moose$hour_s2_t2,
+  hour_c1_t2 = moose$hour_c1_t2,
+  hour_c2_t2 = moose$hour_c2_t2,
+  
+  landuse_end = moose$landuse_end,
+  scaled_model_data
+)
+```
+:::
+
+### Model Formulas
+
+::: panel-tabset
+#### p0
+
+```{r}
+model_0p <- moose_data_scaled_0p %>% fit_clogit(
+  case ~ 
+    landuse_end +
+    landuse_end:temp_end +
+    
+    dist_to_water_end +
+    dist_to_water_end_temp +
+    
+    ruggedness_end +
+    # MOVEMENT KERNEL
+    sl_ +
+    log_sl_ +
+    cos_ta_ +
+    
+    # RANDOM EFFECTS
+    strata(animal_id) +
+    strata(step_id)
+)
+```
+
+#### p1
+
+```{r}
+model_1p <- moose_data_scaled_1p %>% fit_clogit(
+  case ~ 
+    landuse_end +
+    landuse_end:hour_s1_t2 +
+    landuse_end:hour_c1_t2 +
+    landuse_end:temp_start +
+    
+    dist_to_water_end +
+    dist_to_water_end_s1 +
+    dist_to_water_end_c1 +
+    dist_to_water_end_temp_end +
+    
+    ruggedness_end +
+    ruggedness_end_s1 +
+    ruggedness_end_c1 +
+    
+    # MOVEMENT KERNEL
+    sl_ +
+    sl_s1 +
+    sl_c1 +
+    
+    log_sl_ +
+    log_sl_s1 +
+    log_sl_c1 +
+    
+    cos_ta_ +
+    cos_ta_s1 +
+    cos_ta_c1 +
+    
+    # RANDOM EFFECTS
+    strata(animal_id) +
+    strata(step_id)
+)
+```
+
+#### p2
+
+```{r}
+moose_data_scaled_2p <- moose_data_scaled_2p[!is.na(moose_data_scaled_2p$temp_end),]
+model_2p <- moose_data_scaled_2p %>% fit_clogit(
+  case ~ 
+    landuse_end +
+    landuse_end:hour_s1_t2 +
+    landuse_end:hour_s2_t2 +
+    landuse_end:hour_c1_t2 +
+    landuse_end:hour_c2_t2 +
+    landuse_end:poly(temp_start, 2) +
+    
+    dist_to_water_end +
+    dist_to_water_end_s1 +
+    dist_to_water_end_s2 +
+    dist_to_water_end_c1 +
+    dist_to_water_end_c2 +
+    dist_to_water_end_temp_end +
+    
+    ruggedness_end +
+    ruggedness_end_s1 +
+    ruggedness_end_s2 +
+    ruggedness_end_c1 +
+    ruggedness_end_c2 +
+    
+    # MOVEMENT KERNEL
+    sl_ +
+    sl_s1 +
+    sl_s2 +
+    sl_c1 +
+    sl_c2 +
+    
+    log_sl_ +
+    log_sl_s1 +
+    log_sl_s2 +
+    log_sl_c1 +
+    log_sl_c2 +
+    
+    cos_ta_ +
+    cos_ta_s1 +
+    cos_ta_s2 +
+    cos_ta_c1 +
+    cos_ta_c2 +
+    
+    # RANDOM EFFECTS
+    strata(animal_id) +
+    strata(step_id)
+)
+```
+:::
+
+### Preparing covariates / creating timeseries plot data
+
+::: panel-tabset
+#### 0p
+
+```{r}
+coefs_clr_0p <- data.frame(
+  coef = names(model_0p$model$coefficients), 
+  value = unname(model_0p$model$coefficients)
+)
+coefs_clr_0p <- coefs_clr_0p %>%
+  left_join(scaling_attributes_0p, by = c("coef" = "variable")) %>%
+  mutate(value_nat = value / sd) %>%
+  select(coef, value, value_nat)
+
+head(coefs_clr_0p)
+```
+
+#### 1p
+
+```{r}
+coefs_clr_1p <- data.frame(
+  coef = names(model_1p$model$coefficients), 
+  value = unname(model_1p$model$coefficients)
+)
+coefs_clr_1p <- coefs_clr_1p %>%
+  left_join(scaling_attributes_1p, by = c("coef" = "variable")) %>%
+  mutate(value_nat = value / sd) %>%
+  select(coef, value, value_nat)
+
+head(coefs_clr_1p)
+```
+
+#### 2p
+
+```{r}
+coefs_clr_2p <- data.frame(
+  coef = names(model_2p$model$coefficients), 
+  value = unname(model_2p$model$coefficients)
+)
+coefs_clr_2p <- coefs_clr_2p %>%
+  left_join(scaling_attributes_2p, by = c("coef" = "variable")) %>%
+  mutate(value_nat = value / sd) %>%
+  select(coef, value, value_nat)
+
+head(coefs_clr_2p)
+```
+:::
+
+```{r}
+create_harmonics_scaled_long <- function(hour_harmonics_df, coefs_clr, hour_seq = seq(0, 23.9, 1)) {
+  # Create the hour sequence
+  hour <- hour_seq
+  
+  # Create the dataframe of scaled harmonic terms
+  harmonics_scaled_df <- data.frame(
+    "hour" = hour,
+    
+    # LANDUSE
+    "Dedicious & mixed forest" = coefs_clr %>% 
+      filter(grepl("landuse_endDedicious & mixed forest", coef) & !grepl("temp_end", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    "Clear-cut & young forest" = coefs_clr %>% 
+      filter(grepl("landuse_endClear-cut & young forest", coef) & !grepl("temp_end", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    "Open" = coefs_clr %>% 
+      filter(grepl("landuse_endOpen", coef) & !grepl("temp_end", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    "Wetland" = coefs_clr %>% 
+      filter(grepl("landuse_endWetland", coef) & !grepl("temp_end", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    "Water bodies" = coefs_clr %>% 
+      filter(grepl("landuse_endWater bodies", coef) & !grepl("temp_end", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    # GEOGRAPHY    
+    "Ruggedness" = coefs_clr %>% 
+      filter(grepl("ruggedness_end", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    "Dist. to Water" = coefs_clr %>% 
+      filter(grepl("dist_to_water_end", coef) & !grepl("end_temp", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    # MOVEMENT KERNEL
+    "Step Length" = coefs_clr %>% 
+      filter(grepl("sl_", coef) & !grepl("log", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    "Log Step Length" = coefs_clr %>% 
+      filter(grepl("log_sl_", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.),
+    
+    "cos(turning angle)" = coefs_clr %>% 
+      filter(grepl("cos_ta_", coef)) %>% 
+      pull(value) %>% t() %*% t(as.matrix(hour_harmonics_df)) %>% as.numeric(.)
+  )
+  
+  # Convert the dataframe to long format
+  harmonics_scaled_long <- pivot_longer(harmonics_scaled_df, cols = -1, names_to = "coef")
+  
+  return(harmonics_scaled_long)
+}
+
+```
+
+::: panel-tabset
+```{r}
+hour <- seq(0,23.9,0.1) 
+```
+
+## 0p
+
+```{r}
+hour_harmonics_df_0p <- data.frame("linear_term" = rep(1, length(hour)))
+harmonics_scaled_long_0p <- create_harmonics_scaled_long(hour_harmonics_df_0p, coefs_clr_0p)
+```
+
+## 1p
+
+```{r}
+hour_harmonics_df_1p <- data.frame("linear_term" = rep(1, length(hour)),
+                                   "hour_s1" = sin(2*pi*hour/24),
+                                   "hour_c1" = cos(2*pi*hour/24))
+harmonics_scaled_long_1p <- create_harmonics_scaled_long(hour_harmonics_df_1p, coefs_clr_1p)
+```
+
+## 2p
+
+```{r}
+hour_harmonics_df_2p <- data.frame("linear_term" = rep(1, length(hour)),
+                                "hour_s1" = sin(2*pi*hour/24),
+                                "hour_s2" = sin(4*pi*hour/24),
+                                "hour_c1" = cos(2*pi*hour/24),
+                                "hour_c2" = cos(4*pi*hour/24))
+harmonics_scaled_long_2p <- create_harmonics_scaled_long(hour_harmonics_df_2p, coefs_clr_2p)
+```
+:::
+
+::: panel-tabset
+## 0p
+
+```{r}
+ggplot() +
+    geom_path(data = harmonics_scaled_long_0p,
+              aes(x = hour, y = value, colour = coef)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_y_continuous(expression(Time-varying~parameter~values~beta)) +
+    scale_x_continuous("Hour") +
+    scale_color_discrete("Estimate") +
+    theme_classic() +
+    theme(legend.position = "bottom")
+```
+
+## 1p
+
+```{r}
+ggplot() +
+    geom_path(data = harmonics_scaled_long_1p,
+              aes(x = hour, y = value, colour = coef)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_y_continuous(expression(Time-varying~parameter~values~beta)) +
+    scale_x_continuous("Hour") +
+    scale_color_discrete("Estimate") +
+    theme_classic() +
+    theme(legend.position = "bottom")
+```
+
+## 2p
+
+```{r}
+ggplot() +
+    geom_path(data = harmonics_scaled_long_2p,
+              aes(x = hour, y = value, colour = coef)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_y_continuous(expression(Time-varying~parameter~values~beta)) +
+    scale_x_continuous("Hour") +
+    scale_color_discrete("Estimate") +
+    theme_classic() +
+    theme(legend.position = "bottom")
+```
+:::
+
+```{r}
+summary(model_2p)
+```
+
+```{r}
+summary(model_1p)
+```

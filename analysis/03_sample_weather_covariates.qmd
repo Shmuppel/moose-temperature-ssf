@@ -23,7 +23,6 @@ walk(packages, require, character.only = T)
 set.seed(20240703) 
 Sys.setenv(TZ='Europe/Stockholm')
 readRenviron("../.env")
-source('./functions/03_functions.r')
 ```
 
 ```{r}
@@ -223,8 +222,8 @@ rm(pred_steps_start, pred_steps_end)
 Kriging using a data set of millions or rows would take a really long time. Therefore we split our data into week batches when predicting temperature at localisations. Here we'll walk through the process.
 
 ```{r}
-start_date <- as.POSIXct("2017-06-01 00:00:00", tz="Europe/Stockholm")
-end_date <- as.POSIXct("2017-06-08 00:00:00", tz="Europe/Stockholm")
+start_date <- as.POSIXct("2005-07-17 21:00:00", tz="Europe/Stockholm")
+end_date <- as.POSIXct("2005-07-25 03:00:00", tz="Europe/Stockholm")
 weather_data <- get_weather_data(start_date, end_date, "air_temperature")
 weather_data <- as.data.frame(weather_data)
 ```
@@ -234,7 +233,7 @@ weather_data <- as.data.frame(weather_data)
 We'll transform our data into a `STDF` (Space-Time Data-Frame) from the package `spacetime`. The package has a somewhat steep learning curve, but examples are provided in the [spacetime vignette](https://cran.r-project.org/web/packages/spacetime/vignettes/jss816.pdf). Another good resource is the [sftime demo](https://rdrr.io/cran/gstat/src/demo/sftime.R) of `gstat`.
 
 ```{r}
-weather_data$year <- factor(year, levels=regression_model$xlevels$year)
+weather_data$year <- factor(weather_data$year, levels=regression_model$xlevels$year)
 weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable="mean")
 weather_data$res <- weather_data$value - unname(predict(regression_model, weather_data))
 ```
@@ -311,9 +310,9 @@ Next we attempt to fit a sum-metric space-time variogram to the empirical variog
 linear_st_anisotropy <- estiStAni(emperical_variogram, c(100000,400000), t.range=10)
 
 sum_metric_model <- vgmST("sumMetric",
-                          space=vgm(psill=16, "Sph", range=550000, nugget=1),
-                          time= vgm(psill=7, "Sph", range=10, nugget=1), 
-                          joint= vgm(psill=15, "Sph",  range=500000, nugget=1),
+                          space=vgm(psill=6, "Sph", range=550000, nugget=1),
+                          time= vgm(psill=30, "Sph", range=10, nugget=1), 
+                          joint= vgm(psill=4, "Sph",  range=50000, nugget=1),
                           stAni=linear_st_anisotropy)
 
 fit_sum_metric_model <- fit.StVariogram(
@@ -354,6 +353,18 @@ TODO
 Next we can predict some moose steps. As we'll be doing this on large scale with multi-threading, some helper functions have been written. The `03_functions.r` file contains functions that combine all of the essentials that have been carried out so far. It also contains a small helper function to get us started with moose steps. We can either predict the temperature at the start step or the end step, here we'll show an example with end steps.
 
 ```{r}
+prepare_end_steps <- function(df) {
+  df <- df %>%
+    mutate(
+      x    = x2_,
+      y    = y2_,
+      time = t2_,
+      res  = res_end
+    ) %>%
+    arrange(time)
+  return(df)
+}
+
 # The functions shapes the data for us and adds GTT
 localisations <- prepare_end_steps(
   moose_random_steps %>% 
@@ -416,37 +427,27 @@ Below is a separate piece of code that can be used to annotate all the steps in 
 #| warning: false
 
 library(tidyverse)
-packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime", "bestNormalize",
-              "glue", "parallel", "parabar")
+packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime")
 walk(packages, require, character.only = T)
 
 set.seed(20240703) 
 Sys.setenv(TZ='Europe/Stockholm')
 readRenviron("../.env")
-source('./functions/03_functions.r')
 ```
 
 ```{r}
-load('../data/week_batches.RData')
+load('../data/localisations/moose_random_steps.RData')
+load('../data/regression_model.RData')
 ```
-
-Create a list of week batches. Each batch will include:
-
--   week_id: a label for the week (e.g. "2024-03-11")
-
--   moose_data: subset of moose_random_steps that have either t1\_ or t2\_ falling in the main window
-
--   weather_data: weather data for the extended window
 
 ```{r}
 # We use all times from both start and end steps.
-all_times <- c(moose_random_steps$t1_)
+all_times <- c(moose_random_steps$t1_, moose_random_steps$t2_)
 # Define week boundaries using floor_date. (week_start = 1 means Monday)
 unique_week_starts <- sort(unique(floor_date(all_times, unit = "week", week_start = 1)))
 buffer_hours <- 3
 
 week_batches <- lapply(unique_week_starts, function(week_start) {
-  # Define main window: from the week start to week start + 7 days - 1 second.
   main_start <- week_start
   main_end   <- week_start + days(7)
   # Define extended window: add buffer_hours before and after.
@@ -465,139 +466,16 @@ week_batches <- lapply(unique_week_starts, function(week_start) {
   weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable="mean")
   weather_data$res <- weather_data$value - unname(predict(regression_model, weather_data))
   
+  moose_subset <- moose_subset %>% select(
+    animal_id, step_id_, x1_, x2_, y1_, y2_, t1_, t2_, year, res_start, res_end)
+  weather_data <- weather_data %>% select(station_id, date, year, x, y, value, res)
+  
   list(
-    week_id        = as.character(week_start),
+    id        = as.character(week_start),
     moose_data     = moose_subset,
     weather_data   = weather_data
   )
 })
 
 save(week_batches, file='../data/week_batches.RData')
-```
-
-```{r}
-process_week_batch <- function(batch) {
-  week_id          <- batch$week_id
-  moose_data       <- batch$moose_data
-  weather_data     <- batch$weather_data
-  
-  logger(glue("Processing {week_id}"))
-  logger(glue("Building Kriging Model"))
-  kriging_model <- build_weather_kriging_model(weather_data, "air_temperature")
-  
-  logger(glue("Predicting start steps"))
-  start_steps <- prepare_start_steps(moose_data)
-  unique_start_steps <- start_steps %>% distinct(
-    x, y, time, year, animal_id, res,
-    x1_, y1_, t1_
-  )
-  unique_start_steps$temperature_start <- predict_weather_at_localisations(
-    unique_start_steps, 
-    kriging_model,
-    maxdist = 200000,
-    nmax = 5
-  )
-  logger(glue("Predicting end steps"))
-  # Predict for end steps (each row is unique)
-  end_steps <- prepare_end_steps(moose_data)
-  end_steps$temperature_end <- predict_weather_at_localisations(
-    end_steps, 
-    kriging_model,
-    maxdist = 200000, 
-    nmax = 5
-  )
-  
-  unique_start_steps <- unique_start_steps %>% 
-    select("x1_", "y1_", "t1_", "animal_id", "temperature_start")
-  end_steps <- end_steps %>% 
-    select("x2_", "y2_", "t2_", "animal_id", "temperature_end")
-  
-  logger(glue("Adding predictions to moose data"))
-  moose_data <- left_join(
-    moose_data, unique_start_steps,
-    by = c("x1_", "y1_", "t1_", "animal_id")
-  )
-  moose_data <- left_join(
-    moose_data, end_steps,
-    by = c("x2_", "y2_", "t2_", "animal_id")
-  )
-  
-  write_result(moose_data)
-  
-  logger(paste0(
-    as.character(moose_data[1, "t1_"]), "\n",
-    moose_data[1, "temperature_start"], "\n",
-    moose_data[1, "temperature_end"], "\n",
-    moose_data[1, "collar_temperature"]))
-  
-  logger(glue("Finished processing {week_id}"))
-}
-```
-
-The below code chunk runs the palatalization magic, warning it will take a day to run!
-
-```{r}
-backend <- start_backend(cores = 3, cluster_type = "fork")
-
-evaluate(backend, {
-  library(dplyr)
-  library(lubridate)
-  library(sf)
-  library(gstat)
-  library(spacetime)
-  library(meteo)
-  library(sp)
-  library(glue)
-})
-
-# Function to create a result writer (CSV appender)
-make_result_writer <- function(path, ext = "csv", mode = "w") {
-    pid <- Sys.getpid()
-    full_path <- paste0(path, "_", pid, ".", ext)
-    conn_result <<- file(full_path, open = mode)
-    
-    write_result <<- function(input) {
-        write.table(
-          input, conn_result, sep = ";", row.names = FALSE, 
-          col.names = F, append = T
-        )
-        flush(conn_result)
-    }
-}
-
-# Function to create a logger (writes text logs)
-make_logger <- function(path, ext = "txt", mode = "w") {
-    pid <- Sys.getpid()
-    full_path <- paste0(path, "_", pid, ".", ext)
-    conn_log <<- file(full_path, open = mode)
-    
-    logger <<- function(input) {
-        writeLines(input, conn_log)
-        flush(conn_log)
-    }
-}
-
-export(backend,c(
-  "prepare_start_steps", 
-  "prepare_end_steps",
-  "build_weather_kriging_model", 
-  "predict_weather_at_localisations",
-  "process_week_batch",
-  "make_result_writer", 
-  "make_logger"
-),environment())
-
-evaluate(backend, make_logger("log/worker"))
-evaluate(backend, make_result_writer("03_results/result"))
-
-# Configure the progress bar
-configure_bar(
-  type = "modern", 
-  format = ":spin [:bar] :current/:total :percent [:elapsedfull /:eta]"
-)
-
-options(cli.ignore_unknown_rstudio_theme = TRUE)
-par_lapply(backend, week_batches, process_week_batch)
-
-stop_backend(backend)
 ```
