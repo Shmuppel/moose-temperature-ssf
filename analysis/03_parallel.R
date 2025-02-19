@@ -273,7 +273,7 @@ main <- function() {
   # Load week batches data
   load('data/week_batches.RData')
   # Start the parallel backend (adjust cores as needed)
-  backend <- start_backend(cores = 1, cluster_type = "fork")
+  backend <- start_backend(cores = 59, cluster_type = "fork")
   
   # Load required libraries on backend workers
   evaluate(backend, {
@@ -309,10 +309,9 @@ main <- function() {
   options(stop_forceful = TRUE)
   
   # Process batches in parallel
-  results <- par_lapply(backend, week_batches[1], process_batch)
-  
-  write.csv(results, './03_results.csv', sep=';')
-  
+  results <- par_lapply(backend, week_batches, process_batch)
+  results <- bind_rows(results)
+  write.csv(results, './03_results.csv')
   # Stop the backend
   stop_backend(backend)
 }

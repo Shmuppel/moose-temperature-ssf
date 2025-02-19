@@ -1,0 +1,6 @@
+Processing 2003-05-26
+Building Kriging Model
+Predicting start steps
+Predicting end steps
+Adding predictions to moose data
+Finished processing 2003-05-26
