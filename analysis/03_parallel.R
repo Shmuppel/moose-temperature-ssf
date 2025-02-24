@@ -231,6 +231,7 @@ process_batch <- function(batch) {
   moose_data <- moose_data %>% select(id, temperature_start, temperature_end)
   
   logger(glue("Finished processing {batch_id}"))
+  write_result(moose_data)
   return(moose_data)
 }
 
@@ -273,9 +274,9 @@ make_logger <- function(path, ext = "txt", mode = "w") {
 
 main <- function() {
   # Load week batches data
-  load('data/week_batches.RData')
+  load('data/all_batches.RData')
   # Start the parallel backend (adjust cores as needed)
-  backend <- start_backend(cores = 59, cluster_type = "fork")
+  backend <- start_backend(cores = 2, cluster_type = "fork")
   
   # Load required libraries on backend workers
   evaluate(backend, {
@@ -301,6 +302,7 @@ main <- function() {
   ), environment())
   
   evaluate(backend, make_logger("log/worker"))
+  evaluate(backend, make_result_writer("results/worker"))
   # Configure progress bar settings
   configure_bar(
     type   = "modern", 
@@ -311,7 +313,7 @@ main <- function() {
   options(stop_forceful = TRUE)
   
   # Process batches in parallel
-  results <- par_lapply(backend, week_batches, process_batch)
+  results <- par_lapply(backend, all_batches[1:2], process_batch)
   results <- bind_rows(results)
   write.csv(results, './03_results.csv')
   # Stop the backend
