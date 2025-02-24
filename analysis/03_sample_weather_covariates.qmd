@@ -14,7 +14,7 @@ bibliography: ../references.bib
 #| warning: false
 
 library(tidyverse)
-packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime",
+packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime", "data.table",
               "bestNormalize"," ggplot2", "gganimate", "patchwork", "tictoc", "glue")
 walk(packages, require, character.only = T)
 ```
@@ -441,41 +441,68 @@ load('../data/regression_model.RData')
 ```
 
 ```{r}
-# We use all times from both start and end steps.
+# Compute the maximum number of moose data rows per batch.
+max_batch_size <- 5000
+
+# Define week boundaries.
 all_times <- c(moose_random_steps$t1_, moose_random_steps$t2_)
-# Define week boundaries using floor_date. (week_start = 1 means Monday)
 unique_week_starts <- sort(unique(floor_date(all_times, unit = "week", week_start = 1)))
 buffer_hours <- 3
+unique_week_starts <- unique_week_starts[-212]
 
-week_batches <- lapply(unique_week_starts, function(week_start) {
+# Helper function to process one week and return a flat list of batches.
+process_week <- function(week_start) {
   main_start <- week_start
   main_end   <- week_start + days(7)
-  # Define extended window: add buffer_hours before and after.
   extended_start <- main_start - hours(buffer_hours)
   extended_end   <- main_end + hours(buffer_hours)
   
-  # Subset moose data: include any row if either t1_ falls within extended window.
+  # Subset moose data.
   moose_subset <- moose_random_steps %>% 
-    filter(t1_ >= main_start & t1_ < main_end) 
-  if (nrow(moose_subset) == 0) return()
+    filter(t1_ >= main_start & t1_ < main_end)
+  if (nrow(moose_subset) == 0) return(NULL)
   
-  # Pre-fetch weather data for this week’s extended window.
+  # Fetch and process weather data.
   weather_data <- get_weather_data(extended_start, extended_end, "air_temperature")
-  # Add residuals to weather data
-  weather_data$year <- factor(weather_data$year, levels=regression_model$xlevels$year)
-  weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable="mean")
+  weather_data$year <- factor(weather_data$year, levels = regression_model$xlevels$year)
+  weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable = "mean")
   weather_data$res <- weather_data$value - unname(predict(regression_model, weather_data))
   
+  # Select relevant columns.
   moose_subset <- moose_subset %>% select(
     id, animal_id, step_id_, x1_, x2_, y1_, y2_, t1_, t2_, year, res_start, res_end)
   weather_data <- weather_data %>% select(station_id, date, year, x, y, value, res)
   
-  list(
-    id        = as.character(week_start),
-    moose_data     = moose_subset,
-    weather_data   = weather_data
-  )
-})
+  # Determine the number of batches.
+  num_batches <- ceiling(nrow(moose_subset) / max_batch_size)
+  batches <- vector("list", num_batches)
+  
+  # Split into batches using a for loop.
+  for (batch_num in 1:num_batches) {
+    start_row <- (batch_num - 1) * max_batch_size + 1
+    end_row   <- min(batch_num * max_batch_size, nrow(moose_subset))
+    batches[[batch_num]] <- list(
+      id = paste0(as.character(week_start), "_", batch_num),
+      moose_data   = moose_subset[start_row:end_row, ],
+      weather_data = weather_data
+    )
+  }
+  return(batches)
+}
 
-save(week_batches, file='../data/week_batches.RData')
+# Apply the helper function to each week and flatten the result into a 1D list.
+all_batches <- unlist(lapply(unique_week_starts, process_week), recursive = FALSE)
+
+i <- 0
+for (batch in all_batches){
+  i <- i + nrow(batch$moose_data)
+}
+
+save(all_batches, file = '../data/week_batches.RData')
+```
+
+```{r}
+kriging_results <- fread('../data/kriging/03_results.csv')
+moose_random_steps <- moose_random_steps %>% left_join(kriging_results, by=c("id"))
+save(moose_random_steps, file='../data/localisations/moose_random_steps.RData')
 ```

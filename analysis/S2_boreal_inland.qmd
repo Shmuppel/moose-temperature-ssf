@@ -12,7 +12,8 @@ bibliography: ../references.bib
 #| warning: false
 
 library(tidyverse)
-packages <- c("dplyr", "data.table", "amt", "terra", "sf", "sp", "ggspatial", "patchwork")
+packages <- c("dplyr", "data.table", "amt", "terra", "sf", "sp", "ggspatial", "patchwork",
+              "metR","tidyterra", "glmmTMB")
 walk(packages, require, character.only = T)
 ```
 
@@ -20,11 +21,12 @@ walk(packages, require, character.only = T)
 #| code-summary: "Setting seed and loading styles"
 #| message: false
 #| warning: false
+#| 
 set.seed(20240703) 
 source('./util/styles.R')
 ```
 
-## Step Exploration
+## 1.0 Data Exploration
 
 ```{r}
 #| code-summary: "Loading layer files"
@@ -43,8 +45,8 @@ elevation <- crop(elevation, strata, mask=T)
 
 ```{r}
 #| code-summary: "Loading moose steps"
-load('../data/localisations/moose.RData')
-moose <- moose %>% filter(strata == STRATA)
+load('../data/localisations/moose_random_steps.RData')
+moose <- moose_random_steps %>% filter(strata == STRATA)
 ```
 
 ```{r}
@@ -56,15 +58,12 @@ overview_plot <- ggplot() +
   theme_minimal()
 
 # Strata landuse plot
-landuse_downsampled <- aggregate(landuse, fact = 50, fun = "modal", cores=1)
+landuse_downsampled <- aggregate(landuse, fact = 50, fun = "modal", cores=7)
 landuse_plot <- ggplot() + 
   layer_spatial(strata, fill = "transparent") +
-  layer_spatial(landuse_downsampled) + 
+  layer_spatial(as.factor(landuse_downsampled)) + 
   theme_minimal() +
   landuse_legend_fill
-
-combined_plot <- overview_plot + landuse_plot
-print(combined_plot)
 ```
 
 ```{r}
@@ -75,7 +74,7 @@ extent_sf <- st_as_sfc(localisation_extent)  # Convert bbox to an sf object
 elevation <- crop(elevation, as.polygons(ext(localisation_extent), crs="EPSG:3006"), mask=T)
 
 # Main plot: zoomed-in view of the localizations
-main_plot <- ggplot(elevation, aes(x, y)) +
+main_plot <- ggplot(elevation, aes(x,y)) +
   # Strata
   annotation_spatial(strata, fill = "transparent", color = black) +  # Strata in the background
   coord_sf(xlim = c(localisation_extent["xmin"], localisation_extent["xmax"]),
@@ -118,11 +117,639 @@ combined_plot <- main_plot +
     align_to = "panel"
   ) 
 
-# Display the plot
+combined_plot <- overview_plot + landuse_plot + main_plot + plot_layout(ncol=3)
 print(combined_plot)
 ```
 
-## Step Selection Functions
+## 2.0 Data Selection and Scaling
+
+For the boreal inland strata, we hypothesize that:
+
+-   Moose select more for coniferous forest during solar noon, which provides thermal shelter
+
+-   Moose activity is bimodal
+
+-   Moose step length decreases as an interaction with temperature
+
+-   Moose selection for denser forests increases with temperature
+
+-   Moose selection for closer distances to water increases with temperature
+
+Any start paremeters are movement kernel related, end parameters are habitat selection related
+
+### Simple first
+
+```{r}
+load('../data/localisations/moose_random_steps.RData')
+moose <- moose_random_steps %>% filter(strata == STRATA)
+```
+
+```{r}
+# TODO preprocess this before the strata analyses
+
+moose <- moose %>% mutate(
+  landuse_start = factor(landuse_start, levels=landuse_classes),
+  landuse_end = factor(landuse_end, levels=landuse_classes)
+)
+
+moose <- moose %>% filter(
+  !is.na(temperature_start) &
+  !is.na(temperature_end) &
+  !is.na(landuse_end)
+)
+moose <- as.data.frame(moose)
+```
+
+Only include landuses that each animal has visited
+
+```{r}
+moose %>% 
+  count(landuse_start, name = "count") %>% 
+  arrange(desc(count))
+
+# Generate all possible combinations of animal IDs and land use types
+all_combinations <- expand.grid(
+  animal_id = unique(moose$animal_id), 
+  landuse_start = unique(moose$landuse_start)
+)
+
+# Identify land use types that were never visited for each animal
+visited <- moose %>% distinct(animal_id, landuse_start)
+
+missing_landuse <- anti_join(all_combinations, visited, 
+                             by = c("animal_id", "landuse_start")) %>% 
+  pull(landuse_start) %>% 
+  unique()
+
+cat("Missing land use types:\n", paste(missing_landuse, collapse = ", "), "\n\n")
+
+# Define land use types and animals to filter out
+unused_landuse <- c("Open", "Water bodies", "Anthropogenic", "Wetland")
+
+# Apply filters
+moose <- moose %>% 
+  filter(
+    !landuse_start %in% unused_landuse,
+    !landuse_end %in% unused_landuse
+  )
+
+# Count occurrences of each land use type per animal
+moose_summary <- moose %>% 
+  group_by(landuse_end, animal_id) %>% 
+  summarise(tel = n(), .groups = "drop")
+```
+
+```{r}
+moose$landuse_start <- droplevels(moose$landuse_start)
+moose$landuse_end <- droplevels(moose$landuse_end)
+moose <- as.data.frame(moose)
+```
+
+```{r}
+moose <- moose %>% mutate(
+  log_sl = log(sl_),
+  cos_ta = cos(ta_),
+  
+  skogliga_volume_end = scale(skogliga_volume_end),
+  temperature_end = scale(temperature_start),
+  temperature_end = scale(temperature_end),
+  dist_to_water_end = scale(distance_to_water_end),
+  
+  slu_height_end = scale(slu_height_end),
+  slu_volume_birch_end = scale(slu_volume_birch_end),
+  slu_volume_pine_end = scale(slu_volume_pine_end),
+  slu_volume_spruce_end = scale(slu_volume_spruce_end),
+  
+  sl_ = scale(sl_),
+  log_sl = scale(log_sl),
+  cos_ta = scale(cos_ta)
+)
+```
+
+```{r}
+X <- 20
+filtered_df <- df %>%
+  mutate(date = as.Date(t1_)) %>%
+  group_by(date) %>%
+  filter(any(temperature_start >= X)) %>%
+  ungroup() %>%
+  select(-date)
+
+# View result
+print(filtered_df)
+```
+
+Fit a model for each animal
+
+```{r}
+models <- moose %>% 
+  split(.$animal_id) %>% 
+  map(function(individual_data) {
+    fit_issf(formula = case_ ~ 
+            skogliga_volume_end + 
+            skogliga_volume_end:temperature_end +
+            skogliga_volume_end:(hour_s1_t2 + hour_s2_t2 + 
+                                   hour_c1_t2 + hour_c2_t2) + 
+              
+            slu_height_end + 
+            slu_height_end:temperature_end +
+            slu_height_end:(hour_s1_t2 + hour_s2_t2 +
+                              hour_c1_t2 + hour_c2_t2) + 
+            
+            slu_volume_spruce_end + 
+            slu_volume_spruce_end:temperature_end +
+            slu_volume_spruce_end:(hour_s1_t2 + hour_s2_t2 + 
+                                     hour_c1_t2 + hour_c2_t2) + 
+              
+            dist_to_water_end + 
+            dist_to_water_end:temperature_end +
+            dist_to_water_end:(hour_s1_t2 + hour_s2_t2 + 
+                                 hour_c1_t2 + hour_c2_t2) +
+            
+            sl_ +
+            sl_:temperature_start + 
+            sl_:(hour_s1_t1 + hour_s2_t1 +
+                   hour_c1_t1 + hour_c2_t1) +
+            
+            log_sl +
+            log_sl:(hour_s1_t1 + hour_s2_t1 +
+                      hour_c1_t1 + hour_c2_t1) +
+              
+            cos_ta + 
+            cos_ta:(hour_s1_t1 + hour_s2_t1 + 
+                      hour_c1_t1 + hour_c2_t1) +
+                  
+            strata(step_id_),
+        
+        data = individual_data,
+        model = TRUE
+      )
+  })
+```
+
+```{r}
+model_summary_list <- lapply(names(models), function(animal_id) {
+  m <- models[[animal_id]]
+  
+  # Get the summary coefficients matrix.
+  # The matrix rows correspond to model terms and columns to statistics.
+  coefs <- summary(m)$coefficients
+  coefs <- coefs[rownames(coefs) != "(Intercept)", , drop = FALSE]
+  df <- data.frame(term = rownames(coefs), coefs, stringsAsFactors = FALSE)
+  
+  # Rename columns for clarity.
+  names(df) <- c("term", "coef", "exp.coef", "std.error", "z-statistic", "p.value")
+  
+  # Calculate inverse variance: 1/(std.error^2)
+  df$inv_var <- 1 / (df$std.error^2)
+  df$id <- animal_id
+  rownames(df) <- NULL
+  return(df)
+})
+
+
+# Combine the list of data frames into one.
+model_summary <- do.call(rbind, model_summary_list)
+head(model_summary)
+```
+
+```{r}
+population_coefs = model_summary %>% 
+  group_by(term) %>%
+  group_modify(~ {
+    fit = lm(coef ~ 1, data = .x, weights=inv_var)
+    tibble(coef = coef(fit)[1])
+  }) %>% 
+  ungroup()
+
+print(population_coefs)
+```
+
+```{r}
+hour <- seq(0,23.9,0.1) 
+
+# create the dataframe of values of the harmonic terms over the period
+hour_harmonics_df_1p <- data.frame("linear_term" = rep(1, length(hour)),
+                                   "hour_s1" = sin(2*pi*hour/24),
+                                   "hour_c1" = cos(2*pi*hour/24),
+                                   "hour_s2" = sin(4*pi*hour/24),
+                                   "hour_c2" = cos(4*pi*hour/24))
+
+
+harmonics_scaled_df_1p <- data.frame(
+  "hour" = hour,
+  "skogliga_volume" = as.numeric(population_coefs %>% dplyr::filter(
+    grepl("skogliga_volume_end", term) & !grepl("temp", term)) %>% 
+      pull(coef) %>% t() %*% t(as.matrix(hour_harmonics_df_1p))),
+    "slu_height_end" = as.numeric(population_coefs %>% dplyr::filter(
+    grepl("slu_height_end", term) & !grepl("temp", term)) %>% 
+      pull(coef) %>% t() %*% t(as.matrix(hour_harmonics_df_1p))),
+  "dist_to_water_end" = as.numeric(population_coefs %>% dplyr::filter(
+    grepl("dist_to_water_end", term) & !grepl("temp", term)) %>% 
+      pull(coef) %>% t() %*% t(as.matrix(hour_harmonics_df_1p))),
+  "sl_" = as.numeric(
+    population_coefs %>% dplyr::filter(
+      grepl("sl_", term) 
+      & !grepl("log", term) 
+      & !grepl("temp", term)) %>% 
+      pull(coef) %>% t() %*% t(as.matrix(hour_harmonics_df_1p))),
+  "log(sl_)" = as.numeric(
+    population_coefs %>% dplyr::filter(grepl("log", term)) %>% 
+      pull(coef) %>% t() %*% t(as.matrix(hour_harmonics_df_1p))),
+  "cos(ta_)" = as.numeric(
+    population_coefs %>% dplyr::filter(grepl("cos", term)) %>% 
+      pull(coef) %>% t() %*% t(as.matrix(hour_harmonics_df_1p))))
+
+harmonics_scaled_long_1p <- pivot_longer(
+  harmonics_scaled_df_1p, 
+  cols = !1, 
+  names_to = "coef"
+)
+```
+
+```{r}
+ggplot() +
+    geom_path(data = harmonics_scaled_long_1p,
+              aes(x = hour, y = value, colour = coef)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_y_continuous(expression(Time-varying~parameter~values~beta)) +
+    scale_x_continuous("Hour") +
+    scale_color_discrete("Estimate") +
+    theme_classic() +
+    theme(legend.position = "bottom")
+```
+
+```{r}
+# Function to return population-level coefficients for popden and elev
+# We will pass it the list of individual models so we can access the
+# coefficients and variance-covariance matrix from each model object.
+hsa_coefs <- function(model_list) {
+  
+  # Resample the individual coefficients from each model
+  new_coef_list <- lapply(model_list, function(l) {
+    # Point estimate
+    b <- coef(l)
+    # Variance-covariance matrix
+    S <- l$model$var
+    # Return new coefficients
+    b_new <- mvtnorm::rmvnorm(n = 1, mean = b, sigma = S)
+  })
+  
+  # Combine in a data.frame
+  new_coef <- as.data.frame(do.call(rbind, new_coef_list)) %>% 
+    pivot_longer(everything(), names_to = "term", values_to = "estimate")
+
+  new_coefs <- new_coef %>% 
+    group_by(term) %>%
+    group_modify(~ {
+      fit = lm(estimate ~ 1, data = .x)
+      tibble(coef = coef(fit)[1])
+      }) %>% 
+    ungroup() %>%
+    pivot_wider(names_from = term, values_from = coef)
+  
+  # Return coefficients in data.frame
+  return(new_coefs)
+}
+
+# (If you wanted to, you could calculate log-RSS inside that function)
+
+# Now bootstrap to get many sets of new coefficients.
+# Using 100 iterations for speed, but you probably want 2000 + for inference
+boot <- lapply(1:100, function(i) {
+  df <- hsa_coefs(models)
+  df$iter <- i
+  return(df)
+}) %>% 
+  bind_rows()
+
+
+base <- expand.grid(
+  hour = seq(0, 23.9, by=.1),
+  skogliga_volume_end = mean(moose$skogliga_volume_end),
+  temperature_end = mean(moose$temperature_end)
+  ) %>% 
+  mutate(
+    hour_s1_t1 = sin(2*pi*hour_t1/24),
+    hour_s2_t1 = sin(4*pi*hour_t1/24),
+    hour_c1_t1 = cos(2*pi*hour_t1/24),
+    hour_c2_t1 = cos(4*pi*hour_t1/24),
+    
+    hour_s1_t2 = sin(2*pi*hour_t2/24),
+    hour_s2_t2 = sin(4*pi*hour_t2/24),
+    hour_c1_t2 = cos(2*pi*hour_t2/24),
+    hour_c2_t2 = cos(4*pi*hour_t2/24)
+  ) %>% 
+  # Add the movement and tod variables 
+  #  (note, it doesn't matter what values you pick for sl_ and ta_)
+  mutate(
+    sl_ = 45,
+    log_sl_ = log(45),
+    cos_ta_ = 1
+  )
+
+
+
+
+# Now that we're done sampling, we can calculate log-RSS by hand
+x1 <- data.frame(elev = 120, popden = 1000)
+x2 <- data.frame(elev = 80, popden = 500)
+
+# Still calculate point estimate for log-RSS using original model fit
+# Linear predictors (sometimes called g(x))
+g1 <- coef(elev)[[1]] * x1$elev + coef(popden)[[1]] * x1$popden
+g2 <- coef(elev)[[1]] * x2$elev + coef(popden)[[1]] * x2$popden
+
+# log-RSS
+log_rss <- g1 - g2
+
+# Now get confidence interval from bootstrap sample
+
+# Linear predictors for bootstrap iterations
+#   Note that this short code snippet only works with nrow(x1) == 1
+#   Otherwise, iterate over rows of x1.
+boot$g1 <- boot$elevation * x1$elev + boot$popden * x1$popden
+boot$g2 <- boot$elevation * x2$elev + boot$popden * x2$popden
+
+# log-RSS for bootstrap iterations
+boot$log_rss <- boot$g1 - boot$g2
+
+# Mean of bootstrap sample
+mean_boot <- mean(boot$log_rss)
+
+# For 95% confidence interval:
+# 97.5th quantile
+upr_boot <- quantile(boot$log_rss, 0.975)
+# 2.5th quantile
+lwr_boot <- quantile(boot$log_rss, 0.025)
+
+# Distance from bootstrap mean to lwr/upr bounds gives *size* of the CI
+# (Note that mean_boot != log_rss)
+upr_dist <- upr_boot - mean_boot
+lwr_dist <- lwr_boot - mean_boot
+
+# Construct confidence interval by adding distances to MLE ('log_rss')
+c(log_rss + lwr_dist,
+  est = log_rss,
+  log_rss + upr_dist)
+```
+
+```{r}
+# Load packages
+library(amt)
+library(dplyr)
+library(tidyr) # to pivot longer
+library(mvtnorm) # for multivariate normal random number generator
+
+# Load sample data
+dat <- amt_fisher
+hab <- amt_fisher_covar
+
+amt_fisher_covar$elevation <- terra::unwrap(amt_fisher_covar$elevation)
+amt_fisher_covar$popden <- terra::unwrap(amt_fisher_covar$popden)
+
+# Fit individual models
+mods <- dat %>% 
+  nest(trk = x_:t_) %>% 
+  mutate(hsf = map(trk, function(xx) {
+    xx %>% 
+      random_points() %>% 
+      extract_covariates(amt_fisher_covar$elevation) %>% 
+      extract_covariates(amt_fisher_covar$popden) %>% 
+      # Give available points large weights when fitting HSF (not iSSF)
+      mutate(weight = case_when(
+        case_ ~ 1,
+        !case_ ~ 1e5
+      )) %>% 
+      glm(formula = case_ ~ elevation + popden, data = ., family = binomial,
+          weights = weight)
+  }))
+
+covs <- mods %>%
+  mutate(coef = map(hsf, tidy)) %>% 
+  select(sex, id, name, coef) %>% 
+  unnest(cols = coef) %>% 
+  filter(term != "(Intercept)") %>% 
+  mutate(inv_var = 1/(std.error^2))
+
+elev <- lm(estimate ~ 1, data = covs, subset = term == "elevation",
+           weights = inv_var)
+summary(elev)
+
+# Model population-level popden coefficient
+# Intercept-only model = population (weighted) mean
+popden <- lm(estimate ~ 1, data = covs, subset = term == "popden",
+           weights = inv_var)
+summary(popden)
+
+
+## Basically the same as above until here; now we write a function we can use
+## when bootstrapping. There are probably countless ways to go about this
+## that would all give identical results. This is one example.
+
+# Function to return population-level coefficients for popden and elev
+# We will pass it the list of individual models so we can access the
+# coefficients and variance-covariance matrix from each model object.
+
+hsa_coefs <- function(model_list) {
+  
+  # Resample the individual coefficients from each model
+  new_coef_list <- lapply(model_list, function(l) {
+    # Point estimate
+    b <- coef(l)
+    # Variance-covariance matrix
+    S <- vcov(l)
+    # Return new coefficients
+    b_new <- mvtnorm::rmvnorm(n = 1, mean = b, sigma = S)
+  })
+  
+  # Combine in a data.frame
+  new_coef <- as.data.frame(do.call(rbind, new_coef_list)) %>% 
+    pivot_longer(everything(), names_to = "term", values_to = "estimate")
+  
+  # Model population-level elevation coefficient
+  # Dropping the weights because bootstrapping is propagating the uncertainty
+  # Intercept-only model = population mean
+  # Would be equivalent to use mean(), but this allows addition of covariates
+  elev <- lm(estimate ~ 1, data = new_coef, subset = term == "elevation")
+  
+  # Model population-level popden coefficient
+  # Dropping the weights because bootstrapping is propagating the uncertainty
+  # Intercept-only model = population mean
+  # Would be equivalent to use mean(), but this allows addition of covariates
+  popden <- lm(estimate ~ 1, data = new_coef, subset = term == "popden")
+  
+  # Return coefficients in data.frame
+  return(data.frame(elev = coef(elev)[[1]], popden = coef(popden)[[1]]))
+}
+
+# (If you wanted to, you could calculate log-RSS inside that function)
+
+# Now bootstrap to get many sets of new coefficients.
+# Using 100 iterations for speed, but you probably want 2000 + for inference
+set.seed(1)
+boot <- lapply(1:100, function(i) {
+  df <- hsa_coefs(mods$hsf)
+  df$iter <- i
+  return(df)
+}) %>% 
+  bind_rows()
+
+# Now that we're done sampling, we can calculate log-RSS by hand
+x1 <- data.frame(elev = 120, popden = 1000)
+x2 <- data.frame(elev = 80, popden = 500)
+
+# Still calculate point estimate for log-RSS using original model fit
+# Linear predictors (sometimes called g(x))
+g1 <- coef(elev)[[1]] * x1$elev + coef(popden)[[1]] * x1$popden
+g2 <- coef(elev)[[1]] * x2$elev + coef(popden)[[1]] * x2$popden
+
+# log-RSS
+log_rss <- g1 - g2
+
+# Now get confidence interval from bootstrap sample
+
+# Linear predictors for bootstrap iterations
+#   Note that this short code snippet only works with nrow(x1) == 1
+#   Otherwise, iterate over rows of x1.
+boot$g1 <- boot$elev * x1$elev + boot$popden * x1$popden
+boot$g2 <- boot$elev * x2$elev + boot$popden * x2$popden
+
+# log-RSS for bootstrap iterations
+boot$log_rss <- boot$g1 - boot$g2
+
+# Mean of bootstrap sample
+mean_boot <- mean(boot$log_rss)
+
+# For 95% confidence interval:
+# 97.5th quantile
+upr_boot <- quantile(boot$log_rss, 0.975)
+# 2.5th quantile
+lwr_boot <- quantile(boot$log_rss, 0.025)
+
+# Distance from bootstrap mean to lwr/upr bounds gives *size* of the CI
+# (Note that mean_boot != log_rss)
+upr_dist <- upr_boot - mean_boot
+lwr_dist <- lwr_boot - mean_boot
+
+# Construct confidence interval by adding distances to MLE ('log_rss')
+c(log_rss + lwr_dist, 
+  est = log_rss,
+  log_rss + upr_dist)
+```
+
+```{r}
+save(moose, file='../data/localisations/moose.RData')
+#load('../data/localisations/moose.RData')
+```
+
+```{r}
+test_data$times <- 1
+fit_slopes <- gam(
+  cbind(times, step_id_) ~ 
+    sl_ + 
+    log(sl_) + 
+    cos(ta_) +
+    landuse_end + 
+    s(landuse_end, animal_id, bs = "re") , 
+  data = test_data,
+  family = cox.ph, 
+  weights = y
+)
+```
+
+```{r}
+m0 = glmmTMB(case_ ~ -1 + 
+               lanudse_clear_cut + 
+               
+               # MOVEMENT KERNEL
+               sl_ + 
+               log(sl_) +
+               cos(ta_) +  
+               
+               # RANDOM EFFECTS
+               (1 | step_id_) +
+               (0 + lanudse_clear_cut | animal_id),
+             
+              family=poisson, 
+              # NA and 1e3 for the step_id_ random effect
+              map=list(theta=factor(c(NA,1))),
+              start=list(theta=c(log(1e3),rep(0,1))), 
+              control = glmmTMBControl(parallel = 1),
+              data=test_data)
+```
+
+```{r}
+summary(m0)
+```
+
+### 2.1 Select and Scale Data
+
+```{r}
+# Transmute all the columns that need to be scaled
+unscaled_model_data <- moose %>% transmute(
+  sl_ = sl_,
+  log_sl_ = log(sl_),
+  cos_ta_ = cos(ta_)
+)
+
+scaled_model_data <- scale(unscaled_model_data)
+mean_vals <- attr(scaled_model_data, "scaled:center")
+sd_vals <- attr(scaled_model_data, "scaled:scale")
+
+scaling_attributes_0p <- data.frame(
+  variable = names(unscaled_model_data), 
+  mean = mean_vals, 
+  sd = sd_vals
+)
+
+moose_data_scaled_0p <- data.frame(
+  animal_id = moose$animal_id,  
+  step_id = moose$step_id_, 
+  case = moose$case_,
+  
+  scaled_model_data
+)
+```
+
+### 2.2 Model Fitting
+
+```{r}
+model_0p <-fit_issf(
+  case_ ~ 
+    # MOVEMENT KERNEL
+    sl_ +
+    log(sl_) +
+    cos(ta_) +
+    
+    # RANDOM EFFECTS
+    strata(step_id_),
+  
+  model = T, 
+  data=moose_random_steps
+)
+```
+
+```{r}
+summary(model_0p)
+```
+
+### 2.3 Undoing scaling
+
+```{r}
+coefs_df_0p <- data.frame(
+  coef = names(model_0p$model$coefficients), 
+  value = unname(model_0p$model$coefficients)
+)
+coefs_df_0p <- coefs_df_0p %>%
+  left_join(scaling_attributes_0p, by = c("coef" = "variable")) %>%
+  mutate(value_nat = value / sd) %>%
+  select(coef, value, value_nat)
+
+head(coefs_df_0p)
+```
+
+### 2.4 Plotting
 
 ### Preparing and Scaling Data
 
@@ -285,7 +912,7 @@ moose_data_scaled_2p <- data.frame(
 ```
 :::
 
-### Model Formulas
+### Model Fitting
 
 ::: panel-tabset
 #### p0
@@ -319,7 +946,7 @@ model_1p <- moose_data_scaled_1p %>% fit_clogit(
     landuse_end +
     landuse_end:hour_s1_t2 +
     landuse_end:hour_c1_t2 +
-    landuse_end:temp_start +
+    landuse_end:temp_end +
     
     dist_to_water_end +
     dist_to_water_end_s1 +
@@ -360,7 +987,7 @@ model_2p <- moose_data_scaled_2p %>% fit_clogit(
     landuse_end:hour_s2_t2 +
     landuse_end:hour_c1_t2 +
     landuse_end:hour_c2_t2 +
-    landuse_end:poly(temp_start, 2) +
+    landuse_end:poly(temp_end, 2) +
     
     dist_to_water_end +
     dist_to_water_end_s1 +

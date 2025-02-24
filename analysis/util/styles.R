@@ -36,3 +36,18 @@ landuse_legend_fill <- scale_fill_manual("Landuse",values = c(
   "Anthropogenic" = black,
   "Low mountain forest" = brown
 ), na.value="transparent", na.translate=F)
+
+landuse_legend_fill <- scale_fill_manual(
+  "Landuse",
+  values = c(
+    "1"=darkgreen,
+    "2"=green,
+    "3"=beige,
+    "4"=grey,
+    "5"=red,
+    "6"=teal,
+    "7"=black
+  ),
+  na.value="transparent", 
+  na.translate=F
+)

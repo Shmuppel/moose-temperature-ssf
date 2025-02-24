@@ -219,7 +219,8 @@ plot1 <- moose %>% ggplot(aes(x = date, y = factor(strata), colour = factor(stra
     legend.position = "none"
   ) +
   labs(title="Localisations per Year", subtitle="Selected from the Summer Seasons (June - Aug)")
-ggsave('figures/01_localisations_per_year.jpg')
+# ggsave('figures/01_localisations_per_year.jpg')
+plot1
 ```
 
 # 2 - Create tracks and (random) steps
@@ -252,7 +253,8 @@ plot2 <- ggplot() +
     subtitle="n localisations = 400181, n animals = 300"
   ) +
   theme_minimal()
-ggsave('figures/01_localisations_per_strata.jpg')
+#ggsave('figures/01_localisations_per_strata.jpg')
+plot2
 ```
 
 ```{r}
@@ -335,7 +337,7 @@ For each real step, we generate 15 random steps.
 
 ```{r}
 # we'll keep the top 15 later
-number_of_random_steps = 40
+number_of_random_steps = 30
 ```
 
 ```{r}
@@ -365,7 +367,7 @@ moose_random_steps_sf <- st_as_sf(
   crs=st_crs(3006)
 )
 ggplot() +
-  layer_spatial(moose_random_steps_sf, aes(color=as.factor(year))) +
+  layer_spatial(moose_random_steps_sf[moose_random_steps_sf$case_ == T,], aes(color=as.factor(year))) +
   layer_spatial(strata, fill="transparent", color="black") +
   scale_color_viridis_d(name="Year", option = "plasma") +
   theme_minimal()

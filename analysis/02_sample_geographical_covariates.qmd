@@ -110,20 +110,23 @@ We remove strata where the true step / location could not be matched with a land
 ```{r}
 n_before <- nrow(moose_random_steps)
 moose_random_steps <- remove_incomplete_strata(moose_random_steps, col = "landuse_start")
+moose_random_steps <- moose_random_steps %>% filter(!is.na(landuse_end))
 n_after <- nrow(moose_random_steps)
 n_removed <- n_before - n_after
 
 print(glue(
-  "Removed {n_removed} rows with incomplete strata in 'landuse_start'. ",
+  "Removed {n_removed} rows with incomplete strata in 'landuse'. ",
   "{n_after} rows remain."
 ))
 ```
 
 ```{r}
 # Only keep 15 steps
-temp <- as.data.frame(moose_random_steps)
-temp <- temp %>% dplyr::group_by(animal_id, step_id_) %>% dplyr::slice_sample(n=15)
-moose_random_steps <- moose_random_steps[moose_random_steps$id %in% temp$id,]
+true_steps <- moose_random_steps %>% filter(case_ == T)
+control_steps <- moose_random_steps %>% filter(case_ == F)
+control_steps <- as.data.frame(control_steps)
+control_steps <- control_steps %>% group_by(animal_id, step_id_) %>% slice_sample(n=15)
+moose_random_steps <- moose_random_steps %>% filter(id %in% c(true_steps$id, control_steps$id))
 ```
 
 ### 2.2 Update landuse covariates with Felling data
