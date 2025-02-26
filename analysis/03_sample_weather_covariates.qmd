@@ -442,7 +442,7 @@ load('../data/regression_model.RData')
 
 ```{r}
 # Compute the maximum number of moose data rows per batch.
-max_batch_size <- 5000
+max_batch_size <- 10000
 
 # Define week boundaries.
 all_times <- c(moose_random_steps$t1_, moose_random_steps$t2_)
@@ -498,11 +498,18 @@ for (batch in all_batches){
   i <- i + nrow(batch$moose_data)
 }
 
-save(all_batches, file = '../data/week_batches.RData')
+save(all_batches, file = '../data/all_batches.RData')
 ```
 
 ```{r}
 kriging_results <- fread('../data/kriging/03_results.csv')
-moose_random_steps <- moose_random_steps %>% left_join(kriging_results, by=c("id"))
+moose_random_steps <- moose_random_steps %>% left_join(data, by=c("id"))
 save(moose_random_steps, file='../data/localisations/moose_random_steps.RData')
+```
+
+```{r}
+filenames = list.files(path='../result/', pattern = '\\.csv', full.names = TRUE)
+temp <- lapply(filenames, fread, sep=";")
+data <- rbindlist( temp )
+colnames(data) <- c("id", "temperature_start", "temperature_end")
 ```

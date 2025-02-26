@@ -9,6 +9,8 @@ __pycache__/
 *$py.class
 report
 *.log
+results
+
 
 
 # C extensions
