@@ -1,8 +1,9 @@
 ---
-title: "step_generation"
+title: "Step Generation"
 format: html
 editor: visual
 bibliography: ../references.bib
+embed-resources: true
 ---
 
 # 1 - Preprocess moose localisations
@@ -10,11 +11,11 @@ bibliography: ../references.bib
 ```{r}
 #| label: packages
 #| code-summary: "Loading packages"
-#| message: false
 #| warning: false
+#| message: false
 
 library(tidyverse)
-packages <- c("amt", "lubridate", "sf", "ggspatial")
+packages <- c("amt", "lubridate", "sf", "ggspatial", "glue")
 walk(packages, require, character.only = T)
 source('util/styles.R')
 set.seed(20240307)
@@ -137,7 +138,7 @@ seasonal_coverage <- moose %>%
 ```{r}
 ggplot(seasonal_coverage, aes(x=coverage)) +
   geom_histogram(aes(fill = ..count..)) +
-  scale_fill_viridis_c(option = "plasma") +
+  scale_fill_gradientn(colors = greens_to_browns(100)) +
   labs(
     title = "Histogram of Seasonal Coverage", 
     x = "Percent of Fixes vs Theoretical Maximum", 
@@ -147,8 +148,13 @@ ggplot(seasonal_coverage, aes(x=coverage)) +
 ```
 
 ```{r}
-seasonal_coverage <- seasonal_coverage %>% filter(coverage >= threshold)
-moose <- moose %>% filter(animal_id %in% seasonal_coverage$animal_id)
+# First, keep only the rows in seasonal_coverage that meet the threshold
+seasonal_coverage_filtered <- seasonal_coverage %>% 
+  filter(coverage >= threshold) %>% 
+  rename(year = season_year)
+
+# Then, filter moose to only include rows where animal_id and year are in the threshold
+moose <- moose %>% semi_join(seasonal_coverage_filtered, by = c("animal_id", "year"))
 ```
 
 ### 1.3.3 Strata Coverage
@@ -175,7 +181,7 @@ strata_coverage <- moose %>%
 ```{r}
 ggplot(strata_coverage, aes(x=strata_percentage)) +
   geom_histogram(aes(fill = ..count..)) +
-  scale_fill_viridis_c(option = "plasma") +
+  scale_fill_gradientn(colors = greens_to_browns(100)) +
   labs(title = "Histogram of Strata Percentage", x = "Strata Percentage", y = "Count") +
   theme_minimal()
 ```
@@ -202,15 +208,15 @@ table(moose$strata)
 
 ```{r fig.height = 3, fig.width = 7}
 plot1 <- moose %>% ggplot(aes(x = date, y = factor(strata), colour = factor(strata))) +
-  geom_point(alpha = 0.6) +
+  geom_point() +
   scale_y_discrete("Strata") +
   scale_x_datetime("Year", date_breaks="2 years", date_labels="%Y") +
   scale_color_manual(
     values = c(
-    "temperate" = green,
-    "boreal inland" = orange,
-    "boreal coast" = beige,
-    "boreal alpine" = black
+    "temperate" = lightgreen,
+    "boreal inland" = green,
+    "boreal coast" = mossgreen,
+    "boreal alpine" = darkgreen
   )) +
   theme_minimal() +
   theme(
@@ -219,7 +225,7 @@ plot1 <- moose %>% ggplot(aes(x = date, y = factor(strata), colour = factor(stra
     legend.position = "none"
   ) +
   labs(title="Localisations per Year", subtitle="Selected from the Summer Seasons (June - Aug)")
-# ggsave('figures/01_localisations_per_year.jpg')
+ggsave('figures/01_localisations_per_year.jpg', height=3, width=7)
 plot1
 ```
 
@@ -242,18 +248,40 @@ moose_tracks <- moose %>% mk_track(id = animal_id,
 ```
 
 ```{r fig.height = 6, fig.width = 5}
+n_localisations = nrow(moose_tracks)
+n_animals = length(unique(moose_tracks$animal_id))
+n_years <- length(unique(moose_tracks$year))
+
+custom_green_brown <- greens_to_browns(n_years)
+
 # plot the data, spatially colored by year
 moose_sf <- st_as_sf(moose_tracks, coords=c("x_", "y_"), crs=st_crs(3006))
 plot2 <- ggplot() +
-  layer_spatial(strata, fill="transparent", color="darkgrey", size=0.1, alpha=0.6) +
-  layer_spatial(moose_sf, size=0.8, aes(color=as.factor(year))) +
-  scale_color_viridis_d(name="Year", option = "mako") +
+  layer_spatial(strata, fill="transparent", color=grey, size=4, alpha=1) +
+  theme_minimal()
+ggsave('figures/01_strata_plain.jpg')
+plot2
+```
+
+```{r fig.height = 6, fig.width = 5}
+n_localisations = nrow(moose_tracks)
+n_animals = length(unique(moose_tracks$animal_id))
+n_years <- length(unique(moose_tracks$year))
+
+custom_green_brown <- greens_to_browns(n_years)
+
+# plot the data, spatially colored by year
+moose_sf <- st_as_sf(moose_tracks, coords=c("x_", "y_"), crs=st_crs(3006))
+plot2 <- ggplot() +
+  layer_spatial(strata, fill="transparent", color=grey, size=0.1, alpha=0.6) +
+  layer_spatial(moose_sf, size=0.6, aes(color=as.factor(year))) +
+  scale_color_manual(name="Year", values = custom_green_brown) + 
   labs(
     title="Localisations per Strata", 
-    subtitle="n localisations = 400181, n animals = 300"
+    subtitle=glue("n localisations = {n_localisations}, n animals = {n_animals}")
   ) +
   theme_minimal()
-#ggsave('figures/01_localisations_per_strata.jpg')
+ggsave('figures/01_localisations_per_strata.jpg')
 plot2
 ```
 
@@ -369,7 +397,7 @@ moose_random_steps_sf <- st_as_sf(
 ggplot() +
   layer_spatial(moose_random_steps_sf[moose_random_steps_sf$case_ == T,], aes(color=as.factor(year))) +
   layer_spatial(strata, fill="transparent", color="black") +
-  scale_color_viridis_d(name="Year", option = "plasma") +
+  scale_color_manual(name="Year", values = custom_green_brown) + 
   theme_minimal()
 ```
 
@@ -378,16 +406,6 @@ ggplot() +
 # when interpolating temperatures
 moose_random_steps$id <- 1:nrow(moose_random_steps)
 ```
-
-## 2.4 Plot step length and turning angle distributions
-
-### 2.4.1 Step length (negative gamma) distribution for each strata
-
-TODO
-
-### 2.4.1 Turning angle (von Mises) distribution for each strata
-
-TODO
 
 # 3 Export results
 

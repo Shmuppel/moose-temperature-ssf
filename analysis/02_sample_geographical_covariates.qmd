@@ -3,13 +3,14 @@ title: "sample_geographical_covariates"
 format: html
 editor: visual
 bibliography: ../references.bib
+embed-resources: true
 ---
 
 ```{r}
 #| label: packages
 #| code-summary: "Loading packages"
-#| message: false
 #| warning: false
+#| message: false
 
 library(tidyverse)
 packages <- c("amt", "lubridate", "sf", "terra", "glue", "tictoc")

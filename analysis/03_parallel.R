@@ -12,13 +12,12 @@
 # 1. Library Imports & Global Settings
 # --------------------------
 
-install.packages('tidyverse')
 library(tidyverse)
 
 # Load additional required packages
-packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime", "bestNormalize",
+packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime",
               "glue", "parallel", "parabar", "pbapply", "ragg")
-walk(packages, install.packages, character.only = TRUE)
+# walk(packages, install.packages, character.only = TRUE)
 walk(packages, require, character.only = TRUE)
 
 # Set seed and timezone
@@ -321,6 +320,6 @@ main <- function() {
 }
 
 # Uncomment the following line to run the main function when executing the script
-main()
+# main()
 
   

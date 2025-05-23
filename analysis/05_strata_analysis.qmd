@@ -1,0 +1,1074 @@
+---
+title: "Strata Analysis"
+editor: visual
+format:
+  html:
+    toc: true
+    html-math-method: katex
+embed-resources: true
+bibliography: ../references.bib
+---
+
+```{r}
+STRATA <- "boreal inland"
+ANALYSIS_ID = "s2"
+```
+
+```{r, message=FALSE, warning=FALSE}
+#| label: packages
+#| code-summary: "Loading packages"
+#| message: false
+#| warning: false
+
+library(tidyverse)
+packages <- c("dplyr", "data.table", "amt", "terra", "sf", "sp", "ggspatial", "patchwork",
+              "metR","tidyterra", "glmmTMB", "car", "survival", "mvtnorm", "glue", "ggridges",
+              "tools", "scales")
+walk(packages, require, character.only = T)
+```
+
+```{r}
+#| code-summary: "Setting seed and loading styles"
+#| message: false
+#| 
+set.seed(20240703) 
+source('./util/styles.R')
+```
+
+## 1.0 Data Exploration
+
+```{r}
+#| code-summary: "Loading layer files"
+#| message: false
+#| output: false
+
+all_strata <- st_read('../data/strata/strata.gpkg')
+strata <- all_strata[all_strata$name == STRATA, ]
+
+landuse <- rast('../data/geographical_covariates/landuse_2018.tif')
+elevation <- rast('../data/geographical_covariates/elevation.tif')
+
+landuse <- crop(landuse, strata, mask=T)
+elevation <- crop(elevation, strata, mask=T)
+```
+
+```{r}
+#| code-summary: "Loading moose steps"
+load('../data/localisations/moose_random_steps.RData')
+moose <- moose_random_steps %>% filter(strata == STRATA)
+```
+
+```{r}
+# TODO remove, incomplete data due to previous bug in these years
+moose <- moose %>% filter(!year %in% c(2016, 2017, 2018, 2019, 2020, 2021, 2022))
+```
+
+```{r fig.height = 5, fig.width = 8, eval=FALSE}
+#| eval-summary: false
+#| code-summary: "Making overview plot"
+
+true_steps <- st_as_sf(moose[moose$case_ == 1,], coords=c("x1_", "y1_"), crs=st_crs(3006))
+# Calculate the extent of the localizations
+localisation_extent <- st_bbox(true_steps)  # Bounding box of the localizations
+extent_sf <- st_as_sfc(localisation_extent)  # Convert bbox to an sf object
+elevation <- crop(elevation, as.polygons(ext(localisation_extent), crs="EPSG:3006"), mask=T)
+strata_crop <- st_crop(st_geometry(strata), localisation_extent, crs="EPSG:3006")
+  
+# Main plot: zoomed-in view of the localizations
+localisation_elevation_plot <- ggplot(elevation, aes(x,y)) +
+  # Strata
+  annotation_spatial(strata_crop, fill = "transparent", color = "transparent") +  # Strata in the background
+  coord_sf(xlim = c(localisation_extent["xmin"], localisation_extent["xmax"]),
+           ylim = c(localisation_extent["ymin"], localisation_extent["ymax"]),
+           expand = F) +
+  
+  # Elevation
+  geom_relief(aes(z = elevation)) +
+  geom_spatraster(
+    data = elevation, inherit.aes = FALSE,
+    aes(alpha = after_stat(value))
+  ) +
+  # Localizations
+  layer_spatial(true_steps, alpha = 0.2, size= 0.3, color=orange) +
+  
+  # Scales
+  scale_fill_cross_blended_c(breaks = round(seq(150, 2050, length.out=7))) +
+  scale_alpha(range = c(1, 0.25)) +
+  annotation_scale(width_hint=0.5, style="ticks", location="br") +
+  theme_minimal() +
+  theme(
+    axis.title.y = element_text(vjust = +2),
+    axis.title.x = element_text(vjust = -2),
+    panel.grid = element_blank()
+  ) + 
+  guides(alpha = "none", fill = guide_legend(reverse = TRUE)) + 
+  labs(
+    x = "Longitude", 
+    y = "Latitude", 
+    fill="Elevation (m)"
+  )
+
+# Inset map: overview of strata with localization extent highlighted
+strata_plot <- ggplot() +
+  layer_spatial(all_strata, fill = "gray80", color = "black", alpha = 0.5) +
+  layer_spatial(strata_crop, fill = orange, alpha = 0.25) +
+  layer_spatial(true_steps, alpha = 0.2, size= 0.2, color=orange) +
+  geom_sf(data = extent_sf, fill = NA, color = orange, linewidth = 1) +  # Highlight extent
+  theme_void() +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.margin = margin(0, 0, 0, 0, "cm"))
+
+combined_plot = strata_plot + 
+  localisation_elevation_plot + 
+  plot_layout(ncol=2) + 
+    plot_annotation(
+    title=glue("Localisations for {strata} strata"),
+    subtitle=glue("n = {n_localisations}", n_localisations=nrow(moose))
+  )
+
+print(combined_plot)
+ggsave(glue('figures/{ANALYSIS_ID}_overview.jpg'))
+```
+
+## 2. Pre-processing
+
+### 2.1 Plot land use averaged over months
+
+```{r, fig.height = 4, fig.width = 6}
+#| code-summary: "Land cover overview for strata"
+moose <- as.data.frame(moose)
+
+# Aggregate land use proportions over an average day across multiple years
+landuse_daily <- moose %>%
+  mutate(avg_day = format(as.Date(t1_), "%m-%d")) %>% 
+  group_by(avg_day, landuse_start) %>% 
+  summarise(count = n(), .groups = "drop") %>% 
+  group_by(avg_day) %>% 
+  mutate(proportion = count / sum(count)) %>%  # Compute proportion per day
+  ungroup()
+
+ggplot(landuse_daily, aes(x = avg_day, y = proportion, fill = landuse_start, group = landuse_start)) +
+  geom_area(alpha = 0.7) +
+  scale_x_discrete(breaks = c("06-01", "07-01", "08-01", "08-31"),
+                   labels = c("Jun", "Jul", "Aug", "Sep")) +  # Label months
+  theme_classic() +
+  labs(
+    x = "Month", 
+    y = "Proportion", 
+    fill = "Land Cover",
+    title = toTitleCase(glue("{STRATA}"))
+  ) +
+  landuse_legend_fill +
+  guides(fill="none") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Optional: rotate labels
+
+ggsave(glue('figures/{ANALYSIS_ID}_landcover_overview.jpg'), width=4, height=4)
+```
+
+### 2.2 Only keep dominant land uses
+
+Only keep the most visited landuses in order to assure that each moose visited each habitat at least once.
+
+```{r}
+#| code-summary: "Pre-processing landuses"
+# Identify the top 3 most frequent landuse values across both columns
+top_landuses <- moose %>%
+  select(landuse_start, landuse_end) %>%
+  pivot_longer(cols = everything(), values_to = "landuse") %>%
+  count(landuse, sort = TRUE) %>%
+  slice_head(n = 3) %>%
+  pull(landuse)
+
+# Recode landuse values: keep top 3, everything else becomes "Other"
+recode_top3 <- function(x, top_vals) {
+  ifelse(x %in% top_vals, x, "Other")
+}
+
+# Apply the recoding
+moose <- moose %>%
+  mutate(
+    landuse_start = factor(recode_top3(landuse_start, top_landuses),
+                           levels = c(top_landuses, "Other")),
+    landuse_end = factor(recode_top3(landuse_end, top_landuses),
+                         levels = c(top_landuses, "Other"))
+  )
+
+unique(moose$landuse_start)
+unique(moose$landuse_end)
+```
+
+```{r}
+reference_landuse_category = levels(moose$landuse_end)[1]
+reference_landuse_category
+```
+
+For some visual inspection, we can view each landuse visited per moose in the strata.
+
+```{r}
+moose_summary <- moose %>% 
+  group_by(landuse_end, animal_id) %>% 
+  summarise(tel = n(), .groups = "drop") %>% 
+  arrange(animal_id)
+
+moose_summary
+```
+
+Here we remove individuals that did not visit each habitat at least 250 times
+
+```{r}
+moose_summary <- moose_summary %>% filter(landuse_end != "Other")
+ids_to_remove <- moose_summary %>% filter(moose_summary$tel < 500) %>% pull(animal_id)
+
+print(glue("Number of moose total: ", length(unique(moose$animal_id))))
+print(glue("Number of moose without 500x all habitat visits: ", length(ids_to_remove)))
+
+moose <- moose %>% filter(!animal_id %in% ids_to_remove)
+```
+
+### 2.3 Create movement parameters
+
+```{r}
+moose <- moose %>% mutate(
+  log_sl = log(sl_),
+  cos_ta = cos(ta_)
+)
+moose$temperature_start_natural <- moose$temperature_start
+moose$temperature_end_natural <- moose$temperature_end
+```
+
+### 2.4 Scale continuous variables
+
+```{r}
+cols_to_scale <- c(
+  "temperature_start", "temperature_end", "distance_to_water_end",
+  "elevation_end", "ruggedness_end", "skogliga_volume_end",
+  "sl_", "log_sl", "cos_ta"
+)
+
+moose_unscaled <- moose %>% select(cols_to_scale)
+moose_scaled <- scale(moose_unscaled)
+```
+
+```{r}
+scaling_attributes <- data.frame(
+  variable = cols_to_scale, 
+  mean = attr(moose_scaled, "scaled:center"), 
+  sd = attr(moose_scaled, "scaled:scale")
+)
+```
+
+```{r}
+moose <- moose %>%
+  select(-all_of(cols_to_scale)) %>%  # Drop the unscaled versions
+  bind_cols(moose_scaled)             # Add the scaled versions
+```
+
+### 2.5 Check for correlation between explanatory variables
+
+```{r}
+vif(
+  glm(
+    case_ ~ 
+      sl_ +
+      log_sl +
+      cos_ta +
+      
+      temperature_end +
+      distance_to_water_end +
+      
+      elevation_end +
+      ruggedness_end +
+      
+      landuse_end +
+      skogliga_volume_end +
+
+      hour_s1_t2 +
+      hour_s2_t2 +
+      hour_s3_t2 + 
+      hour_c1_t2 +
+      hour_c2_t2 +
+      hour_c3_t2,
+      data=moose
+  )
+)
+```
+
+## 3 Heatwaves
+
+### 3.1 Get heatwave events and split data in two sets
+
+Heatwaves 3 or more days with a max temperature in the top 20th percentile
+
+```{r}
+detect_heatwave_events <- function(
+    df, 
+    temp_col = "temperature_start_natural", 
+    time_col = "t1_",
+    heatwave_percentile = 0.75, 
+    min_streak_days = 3,
+    control_method = c("complement", "low_percentile"),
+    control_percentile = 0.2) {
+  
+  control_method <- match.arg(control_method)
+  df <- as.data.frame(df)
+  
+  # Ensure 'date' column exists
+  df <- df %>%
+    mutate(date = as.Date(.data[[time_col]]))
+  
+  # Get daily maximum temperature
+  daily_max <- df %>%
+    group_by(date) %>%
+    summarize(max_temp = max(.data[[temp_col]], na.rm = TRUE), .groups = "drop")
+  
+  # Determine temperature threshold for heatwave
+  heat_thresh <- quantile(daily_max$max_temp, heatwave_percentile, na.rm = TRUE)
+  
+  # Identify candidate heatwave days
+  heat_days <- daily_max %>%
+    filter(max_temp > heat_thresh) %>%
+    pull(date)
+  
+  # Helper to find consecutive streaks
+  find_streaks <- function(dates, min_length) {
+    dates <- sort(dates)
+    streaks <- list()
+    current_streak <- c()
+    
+    for (i in seq_along(dates)) {
+      if (i == 1 || difftime(dates[i], dates[i - 1], units = "days") == 1) {
+        current_streak <- c(current_streak, dates[i])
+      } else {
+        if (length(current_streak) >= min_length) {
+          streaks <- append(streaks, list(current_streak))
+        }
+        current_streak <- dates[i]
+      }
+    }
+    if (length(current_streak) >= min_length) {
+      streaks <- append(streaks, list(current_streak))
+    }
+    return(as.Date(unlist(streaks)))
+  }
+  
+  # Detect valid heatwave streaks
+  heatwave_dates <- find_streaks(heat_days, min_streak_days)
+  
+  # Filter for heatwave and control data
+  heatwave_data <- df %>% filter(date %in% heatwave_dates)
+  
+  control_data <- if (control_method == "complement") {
+    df %>% filter(!date %in% heatwave_dates)
+  } else {
+    cold_thresh <- quantile(daily_max$max_temp, control_percentile, na.rm = TRUE)
+    cold_days <- daily_max %>%
+      filter(max_temp < cold_thresh) %>%
+      pull(date)
+    df %>% filter(date %in% cold_days)
+  }
+  
+  return(list(
+    heatwave_dates = unique(heatwave_dates),
+    heatwave_data = heatwave_data,
+    control_data = control_data
+  ))
+}
+
+```
+
+```{r}
+result <- detect_heatwave_events(
+  df = moose,
+  heatwave_percentile = 0.75,
+  min_streak_days = 3,
+  control_method = "complement"
+)
+```
+
+### 3.2 Plot Heatwaves
+
+```{r}
+plot_heatwaves <- function(
+    df, 
+    temp_col = "temperature_start_natural", 
+    time_col = "t1_", 
+    heatwave_dates,
+    heatwave_percentile = 0.7) {
+  
+  df <- df %>%
+    mutate(date = as.Date(.data[[time_col]]),
+           year = year(date))
+  
+  # Daily max temperatures
+  daily_max <- df %>%
+    group_by(date, year) %>%
+    summarize(max_temp = max(.data[[temp_col]], na.rm = TRUE), .groups = "drop") %>%
+    arrange(year, date) %>%
+    mutate(heatwave = date %in% heatwave_dates)
+  
+  # Group by year for proper lead calculation
+  daily_max <- daily_max %>%
+    group_by(year) %>%
+    mutate(
+      next_date = lead(date),
+      next_temp = lead(max_temp),
+      next_heatwave = lead(heatwave),
+      segment_type = ifelse(heatwave & next_heatwave, "Heatwave", "Normal")
+    ) %>%
+    ungroup() %>%
+    filter(!is.na(next_date))
+
+  # Heatwave threshold
+  heat_thresh <- quantile(daily_max$max_temp, heatwave_percentile, na.rm = TRUE)
+  
+  # Plot line segments with color based on heatwave status
+  p <- ggplot(daily_max) +
+    geom_segment(aes(x = date, xend = next_date,
+                     y = max_temp, yend = next_temp,
+                     color = segment_type),
+                 linewidth = 1) +
+    geom_hline(yintercept = heat_thresh, linetype = "dashed", color = "red") +
+    scale_color_manual(values = c("Normal" = "grey60", "Heatwave" = "firebrick")) +
+    labs(
+      title = "Daily Max Temperatures with Heatwave Periods",
+      subtitle = paste0("Threshold (", heatwave_percentile * 100, "th percentile): ", 
+                        round(heat_thresh, 1), "°C"),
+      x = "Date",
+      y = "Max Daily Temperature (°C)",
+      color = "Period"
+    ) +
+    facet_wrap(~year, scales = "free_x") +
+    theme_minimal(base_size = 13)
+
+  return(p)
+}
+```
+
+```{r}
+plot_heatwaves(
+  df = moose,
+  temp_col = "temperature_start_natural",
+  time_col = "t1_",
+  heatwave_dates = result$heatwave_dates,
+  heatwave_percentile = 0.75
+)
+```
+
+```{r}
+plot_heatwaves_ridgeline <- function(
+    df, 
+    temp_col = "temperature_start_natural", 
+    time_col = "t1_", 
+    heatwave_dates,
+    heatwave_percentile = 0.7) {
+  
+  df <- df %>%
+    mutate(date = as.Date(.data[[time_col]]),
+           year = factor(year(date)),
+           heatwave = date %in% heatwave_dates)
+  
+  # Compute heatwave threshold
+  heat_thresh <- quantile(df[[temp_col]], heatwave_percentile, na.rm = TRUE)
+  
+  # Plot: ridgeline of daily temps per year, with heatwave days filled differently
+  p <- ggplot(df, aes(x = .data[[temp_col]], y = year, fill = heatwave)) +
+    geom_density_ridges(scale = 2, alpha = 0.60, rel_min_height = 0.01, color = "white") +
+    scale_fill_manual(values = c("TRUE" = red, "FALSE" = beige)) +
+    geom_vline(xintercept = heat_thresh, linetype = "dashed", color = red) +
+    labs(
+      title = glue("Distributions of Daily Temperatures for {STRATA}"),
+      subtitle = paste0(
+        "Heatwave = >", round(heat_thresh, 1), "°C (", 
+        heatwave_percentile * 100, "th percentile)"),
+      x = "Daily Temperature (°C)",
+      y = "Year",
+      fill = "Heatwave"
+    ) +
+    theme_minimal(base_size = 14)
+
+  return(p)
+}
+
+```
+
+```{r fig.height = 8, fig.width = 7}
+plot_heatwaves_ridgeline(
+  df = moose,
+  temp_col = "temperature_start_natural",
+  time_col = "t1_",
+  heatwave_dates = result$heatwave_dates,
+  heatwave_percentile = 0.75
+)
+```
+
+```{r}
+plot_heatwave_lines <- function(
+    df, 
+    temp_col = "temperature_start_natural", 
+    time_col = "t1_", 
+    heatwave_dates,
+    heatwave_percentile = 0.75
+) {
+  df <- df %>%
+    mutate(
+      date = as.Date(.data[[time_col]]),
+      year = year(date),
+      dummy_date = as.Date(paste0("2000-", format(date, "%m-%d")))
+    ) %>%
+    filter(month(date) %in% 6:8)  # Only keep summer months
+  
+  # Daily max temperatures
+  daily_max <- df %>%
+    group_by(date, dummy_date, year) %>%
+    summarize(max_temp = max(.data[[temp_col]], na.rm = TRUE), .groups = "drop") %>%
+    arrange(year, date) %>%
+    mutate(heatwave = date %in% heatwave_dates)
+  
+  # Group by year for proper lead calculation
+  daily_max <- daily_max %>%
+    group_by(year) %>%
+    mutate(
+      next_dummy_date = lead(dummy_date),
+      next_temp = lead(max_temp),
+      next_heatwave = lead(heatwave),
+      segment_type = ifelse(heatwave & next_heatwave, "Heatwave", "Normal")
+    ) %>%
+    ungroup() %>%
+    filter(!is.na(next_dummy_date))
+  
+  heat_thresh <- quantile(daily_max$max_temp, heatwave_percentile, na.rm = TRUE)
+
+  # Year-based palette for heatwave segments
+  year_palette <- colorRampPalette(c("#fee0d2", "#99000d"))(length(unique(daily_max$year)))
+  names(year_palette) <- sort(unique(daily_max$year))
+
+  # Plot
+  p <- ggplot() +
+    # Heatwave segment highlighting
+    # Daily temperature lines
+    geom_line(
+      data = daily_max,
+      aes(x = dummy_date, y = max_temp, group = factor(year)),
+      color = "grey60", linewidth = 0.6, alpha = 0.5
+    ) +
+    geom_segment(
+      data = daily_max %>% filter(segment_type == "Heatwave"),
+      aes(x = dummy_date, xend = next_dummy_date,
+          y = max_temp, yend = next_temp,
+          color = factor(year)),
+      linewidth = 1
+    ) +
+    geom_hline(yintercept = heat_thresh, linetype = "dashed", color = "red") +
+    scale_color_manual(values = year_palette) +
+    scale_x_date(
+      date_breaks = "1 month",
+      date_labels = "%b",
+      limits = as.Date(c("2000-06-01", "2000-08-31"))
+    ) +
+    labs(
+      title = toTitleCase(glue("{STRATA}")),
+      subtitle = paste0("Threshold (", heatwave_percentile * 100, "th percentile): ", 
+                        round(heat_thresh, 1), "°C"),
+      x = "Date",
+      y = "Max Daily Temperature (°C)",
+      color = "Heatwave Year"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      panel.grid.minor = element_blank(),
+    )
+
+  return(p)
+}
+
+```
+
+```{r}
+plot_heatwave_lines(
+  df = moose,
+  temp_col = "temperature_start_natural",
+  time_col = "t1_",
+  heatwave_dates = result$heatwave_dates,
+  heatwave_percentile = 0.75
+)
+ggsave(glue('figures/{ANALYSIS_ID}_heatwaves_line.jpg'))
+```
+
+```{r}
+moose_control <- result$control_data
+moose_heatwaves <- result$heatwave_data
+```
+
+```{r}
+summary(moose_control$temperature_end)
+summary(moose_heatwaves$temperature_end)
+```
+
+## 3. Model fitting
+
+### 3.1 Define model formulas with various pairs of harmonics
+
+Simplest model, no harmonics
+
+```{r}
+model_formula_0p <- case_ ~
+  landuse_end +
+  distance_to_water_end +
+  (landuse_end + distance_to_water_end):(temperature_end) +
+  
+  elevation_end + 
+  ruggedness_end +
+  
+  sl_ +
+  log_sl +
+  cos_ta +
+  (sl_ + log_sl + cos_ta):(temperature_start) + 
+  
+  strata(step_id_)
+```
+
+Model with 1 pair of harmonics
+
+```{r}
+model_formula_1p <- case_ ~  
+  landuse_end + 
+  distance_to_water_end + 
+  elevation_end + 
+  (landuse_end + distance_to_water_end + elevation_end):(hour_s1_t2 + hour_c1_t2) + 
+             
+  ruggedness_end + 
+    
+  sl_ +
+  log_sl +
+  cos_ta + 
+  (sl_ + log_sl + cos_ta):(hour_s1_t1 + hour_c1_t1) + 
+                  
+  strata(step_id_)
+```
+
+Model with 2 pairs of harmonics
+
+```{r}
+model_formula_2p <- case_ ~  
+  landuse_end + 
+  distance_to_water_end + 
+  elevation_end + 
+  (landuse_end + distance_to_water_end + elevation_end):(hour_s1_t2 + hour_c1_t2 + hour_s2_t2 + hour_c2_t2) + 
+             
+  ruggedness_end + 
+    
+  sl_ +
+  log_sl +
+  cos_ta + 
+  (sl_ + log_sl + cos_ta):(hour_s1_t1 + hour_c1_t1 + hour_s2_t1 + hour_c2_t1) + 
+                  
+  strata(step_id_)
+```
+
+Model with 3 pairs of harmonics
+
+```{r}
+model_formula_3p <- case_ ~  
+  landuse_end + 
+  distance_to_water_end + 
+  elevation_end +
+  (landuse_end + distance_to_water_end + elevation_end):(hour_s1_t2 + hour_c1_t2 + hour_s2_t2 + hour_c2_t2 + hour_s3_t2 + hour_c3_t2) + 
+             
+  ruggedness_end + 
+    
+  sl_ +
+  log_sl +
+  cos_ta + 
+  (sl_ + log_sl + cos_ta):(hour_s1_t1 + hour_c1_t1 + hour_s2_t1 + hour_c2_t1 + hour_s3_t1 + hour_c3_t1) + 
+                  
+  strata(step_id_)
+```
+
+### 3.2 Compare model formulas (AIC), on all moose data for the strata
+
+```{r}
+model_0p <- clogit(model_formula_0p, data = moose, model = TRUE, iter.max = 40)
+model_1p <- clogit(model_formula_1p, data = moose, model = TRUE, iter.max = 40)
+model_2p <- clogit(model_formula_2p, data = moose, model = TRUE, iter.max = 40)
+   
+AIC(model_0p, model_1p, model_2p)
+```
+
+```{r}
+chosen_model = model_formula_2p
+```
+
+### 3.3 Fit the best model individually for all animals
+
+```{r}
+# Function to fit conditional logistic regression models for each animal
+fit_clogit_models <- function(data) {
+  data %>%
+    split(.$animal_id) %>%
+    map(~ clogit(
+      chosen_model,
+      data = .x,
+      model = TRUE,
+      iter.max = 40
+    ))
+}
+
+# Apply function to both datasets
+models_control <- fit_clogit_models(moose_control)
+models_heatwave <- fit_clogit_models(moose_heatwaves)
+```
+
+```{r}
+get_model_summary = function(animal_id, model_list) {
+  m <- model_list[[animal_id]]
+  
+  # Get the summary coefficients matrix.
+  # The matrix rows correspond to model terms and columns to statistics.
+  coefs <- summary(m)$coefficients
+  coefs <- coefs[rownames(coefs) != "(Intercept)", , drop = FALSE]
+  df <- data.frame(term = rownames(coefs), coefs, stringsAsFactors = FALSE)
+  
+  # Rename columns for clarity.
+  names(df) <- c("term", "coef", "exp.coef", "std.error", "z-statistic", "p.value")
+  
+  # Calculate inverse variance: 1/(std.error^2)
+  df$inv_var <- 1 / (df$std.error^2)
+  df$id <- animal_id
+  rownames(df) <- NULL
+  return(df)
+}
+
+model_control_summary <- do.call(rbind, 
+                                 lapply(names(models_control), 
+                                        get_model_summary, 
+                                        model_list = models_control)
+                                 )
+model_heatwave_summary <- do.call(rbind, 
+                                  lapply(names(models_heatwave), 
+                                         get_model_summary, 
+                                         model_list = models_heatwave)
+                                  )
+```
+
+```{r}
+compute_population_coefs <- function(model_summary) {
+  population_coefs <- model_summary %>% filter(!is.na(coef) & !is.infinite(inv_var))
+  
+  population_coefs <- population_coefs %>% 
+    group_by(term) %>%
+    group_modify(~ {
+      fit = lm(coef ~ 1, data = .x %>% filter(!is.na(coef)), weights=inv_var)
+      tibble(coef = coef(fit)[1])
+    }) %>% 
+    ungroup()
+  
+  return(population_coefs)
+}
+
+# Compute for both model summaries
+population_coefs_control <- compute_population_coefs(model_control_summary)
+population_coefs_heatwave <- compute_population_coefs(model_heatwave_summary)
+
+# Print results
+population_coefs_control
+population_coefs_heatwave
+```
+
+## Bootstrap confidence intervals
+
+```{r}
+hsa_coefs <- function(model_list) {
+  
+  # Resample coefficients from each model
+  new_coef_list <- lapply(model_list, function(l) {
+    b <- coef(l)  # Point estimate
+    S <- vcov(l)  # Variance-covariance matrix
+    mvtnorm::rmvnorm(n = 1, mean = b, sigma = S)  # Simulated new coefficients
+  })
+  
+  # Combine into a data frame
+  new_coef <- do.call(rbind, new_coef_list)
+  new_coef <- as.data.frame(new_coef) %>% 
+    pivot_longer(everything(), names_to = "term", values_to = "estimate")
+  
+  # Fit a weighted mean model for each term
+  pop_models <- new_coef %>%
+    group_by(term) %>%
+    filter(!any(is.na(estimate))) %>%  # Skip terms with NA values
+    summarize(estimate = coef(lm(estimate ~ 1, data = cur_data()))[[1]], 
+              .groups = "drop") %>%
+    pivot_wider(names_from = term, values_from = estimate)
+
+  return(pop_models)
+}
+
+get_bootstrap_coefficients <- function(model_list, population_coefs) {
+    # Bootstrap with 2000 iterations for all terms
+  boot <- lapply(1:2000, function(i) {
+    df <- hsa_coefs(model_list)
+    df$iter <- i
+    return(df)
+  }) %>% 
+    bind_rows()
+  
+   # Compute bootstrap statistics
+  boot_stats <- data.frame(
+    lower = sapply(boot, function(x) unname(quantile(x, probs = 0.025, na.rm = TRUE))),
+    mean  = sapply(boot, function(x) unname(mean(x, na.rm = TRUE))),
+    upper = sapply(boot, function(x) unname(quantile(x, probs = 0.975, na.rm = TRUE)))
+  )
+  
+  # Compute confidence interval sizes
+  ci_sizes <- data.frame(
+    term  = rownames(boot_stats),
+    ci_lower_size = boot_stats$lower - boot_stats$mean,
+    ci_upper_size = boot_stats$upper - boot_stats$mean
+  )
+
+  # Merge with population coefficients to get the final confidence intervals
+  final_results <- population_coefs %>%
+    rename(mean = coef) %>%  # Rename to match structure
+    inner_join(ci_sizes, by = "term") %>% 
+    mutate(
+      lower = mean + ci_lower_size,
+      upper = mean + ci_upper_size
+    ) %>% 
+    select(term, lower, mean, upper)  # Keep only relevant columns
+  
+  final_results <- final_results  %>%
+    pivot_longer(cols = -term, names_to = "stat", values_to = "value") %>%
+    pivot_wider(names_from = term, values_from = value) %>%
+    select(-stat) %>%
+    as.data.frame()
+  
+  rownames(final_results) <- c("lower", "mean", "upper")
+  
+  return(final_results)
+}
+
+boot_control_results <- get_bootstrap_coefficients(models_control, population_coefs_control)
+boot_heatwave_results <- get_bootstrap_coefficients(models_heatwave, population_coefs_heatwave)
+```
+
+```{r}
+compute_harmonics_scaled <- function(population_coefs) {
+  # population_coefs is assumed to be a data frame where:
+  # - Columns are coefficient names (e.g. "cos_ta", "hour_s1_t1", etc.)
+  # - Rows are named "lower", "mean", "higher" (or stored in a column if preferred)
+  
+  # Create the harmonic terms (here, for t2 harmonics as in your original code)
+  hour <- seq(0, 23.9, 0.1)
+  hour_harmonics_df_1p <- data.frame(
+    linear_term = rep(1, length(hour)),
+    hour_c1_t2  = cos(2 * pi * hour / 24),
+    hour_c2_t2  = cos(4 * pi * hour / 24),
+    hour_s1_t2  = sin(2 * pi * hour / 24),
+    hour_s2_t2  = sin(4 * pi * hour / 24)
+  )
+  
+  # Define the groups and how to filter the coefficient names.
+   groups <- list(
+    "Clear-cut & young forest" = list(filter_pattern = "landuse_endClear"),
+    #"Dedicious & mixed forest" = list(filter_pattern = "landuse_endDedicious"),
+    "Coniferous forest" = list(filter_pattern = "landuse_endConiferous"),
+    #"Open" = list(filter_pattern = "landuse_endOpen"),
+    "Wetland" = list(filter_pattern = "landuse_endWetland"),
+    
+    "Elevation" = list(filter_pattern = "elevation"),
+    "Distance to water" = list(filter_pattern = "water"),
+    
+    "Step length" = list(filter_pattern = "sl_", exclude_pattern = "log"),
+    "Log step length" = list(filter_pattern = "log", exclude_pattern = "sl_"),
+    "Cos turning angle" = list(filter_pattern = "cos")
+  )
+  
+  # Get the statistic names from the row names of population_coefs
+  stat_names <- rownames(population_coefs)
+  
+  # For each statistic (lower, mean, higher), compute the harmonic-scaled values
+  results_list <- lapply(stat_names, function(stat) {
+    df_stat <- data.frame(hour = hour)
+    
+    for (grp in names(groups)) {
+      pat  <- groups[[grp]]$filter_pattern
+      excl <- groups[[grp]]$exclude_pattern
+      
+      # Use the coefficient names (i.e. the column names) to select the correct terms
+      coef_names <- names(population_coefs)[grepl(pat, names(population_coefs))]
+      if (!is.null(excl)) {
+        coef_names <- coef_names[ !grepl(excl, coef_names) ]
+      }
+      
+      # Extract the coefficients for the given statistic and group
+      # This will be a numeric vector whose length should match the number of columns in
+      # hour_harmonics_df_1p
+      coef_vec <- as.numeric(population_coefs[stat, coef_names, drop = FALSE])
+      
+      coef_mat <- matrix(coef_vec, nrow = 1)
+      # Add intercept 0 to each vector if needed
+      coef_vec <- apply(coef_mat, 1, function(row) {
+        if (length(row) == ncol(hour_harmonics_df_1p) - 1) {
+          c(0, row)  # add missing intercept
+        } else {
+          row
+        }
+      })
+
+      # Multiply the coefficients by the harmonic terms
+      # (Assumes that the order of coef_vec corresponds to the columns in hour_harmonics_df_1p)
+      group_values <- as.numeric(t(as.matrix(coef_vec)) %*% t(as.matrix(hour_harmonics_df_1p)))
+      
+      # Add the computed values as a new column in the data frame for this statistic
+      df_stat[[grp]] <- group_values
+    }
+    # Record which statistic these values come from
+    df_stat$stat <- stat
+    df_stat
+  })
+
+  # Combine the results for all statistics
+  harmonics_scaled_df <- do.call(rbind, results_list)
+  
+  # Optionally, reshape the data into long format
+  harmonics_scaled_long <- pivot_longer(
+    harmonics_scaled_df,
+    cols = names(groups),
+    names_to = "group",
+    values_to = "value"
+  )
+  
+  return(harmonics_scaled_long)
+}
+
+harmonics_control <- compute_harmonics_scaled(boot_control_results)
+harmonics_heatwave <- compute_harmonics_scaled(boot_heatwave_results)
+```
+
+## Convert to Natural Values
+
+## Plot Results
+
+```{r}
+plot_harmonics <- function(harmonics_scaled, title, filter_groups = NULL, filter_pattern = NULL) {
+  # Filter based on exact group names
+  if (!is.null(filter_groups)) {
+    harmonics_scaled <- harmonics_scaled %>%
+      filter(group %in% filter_groups)
+  }
+
+  # Filter based on one or more regex patterns
+  if (!is.null(filter_pattern)) {
+    pattern_match <- Reduce(`|`, lapply(filter_pattern, function(pat) grepl(pat, harmonics_scaled$group)))
+    harmonics_scaled <- harmonics_scaled[pattern_match, ]
+  }
+
+  # Convert to wide format for confidence intervals
+  harmonics_wide <- harmonics_scaled %>%
+    pivot_wider(names_from = stat, values_from = value)  %>%
+    mutate(hour = hour+3)
+
+  plot1 <- ggplot() +
+    # Optional: uncomment if you use CI ribbons and keep group filtering consistent
+    #geom_ribbon(data = harmonics_wide,
+    #            aes(x = hour, ymax = upper, ymin = lower, fill = group),
+    #            alpha = 0.2) +
+    geom_path(data = harmonics_wide %>% select(hour, group, mean),
+              aes(x = hour, y = mean, colour = group)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    scale_x_continuous("Hour") +
+    theme_classic() +
+    theme(legend.position = "bottom") +
+    harmonic_legend_color + 
+    ggtitle(title)
+  
+  return(plot1)
+}
+```
+
+### Plot landuse variables
+
+```{r}
+filter_pattern = levels(unique(moose$landuse_end))
+
+p1 <- plot_harmonics(harmonics_control, "Control Model", filter_pattern = filter_pattern)
+p2 <- plot_harmonics(harmonics_heatwave, "Heatwave Model", filter_pattern = filter_pattern)
+
+p_combined <- p1 + p2 + 
+  plot_annotation(
+    title = toTitleCase(STRATA),
+    subtitle = glue('Reference Category: {reference_landuse_category}')) + 
+  plot_layout(
+    ncol = 2, 
+    guides = 'collect', 
+    axis_titles = "collect_y") & 
+  theme(legend.position = 'bottom')
+
+p_combined <- apply_consistent_y_lims(p_combined) & 
+  ylab(expression(Time-varying~parameter~values~beta))
+
+print(p_combined)
+ggsave(glue('figures/{ANALYSIS_ID}_results_habitat_selection.jpg'))
+```
+
+### Plot continuous variables
+
+```{r}
+filter_pattern = c("Elevation", "water")
+
+p1 <- plot_harmonics(harmonics_control, "Control Model", filter_pattern = filter_pattern)
+p2 <- plot_harmonics(harmonics_heatwave, "Heatwave Model", filter_pattern = filter_pattern)
+
+p_combined <- p1 + p2 + 
+  plot_annotation(title = toTitleCase(STRATA)) +
+  plot_layout(
+    ncol = 2, 
+    guides = 'collect', 
+    axis_titles = "collect_y") & 
+  theme(legend.position = 'bottom')
+
+p_combined <- apply_consistent_y_lims(p_combined) & 
+  ylab(expression(Time-varying~parameter~values~beta))
+
+print(p_combined)
+ggsave(glue('figures/{ANALYSIS_ID}_results_water_elevation.jpg'))
+```
+
+### Plot movement variables
+
+To update the Gamma and von Mises distribution from the tentative distributions (e.g. [Fieberg et al. 2021](#ref-Fieberg2021-wx), Appendix C), we just do the calculation at each time point (for the natural-scale coefficients).
+
+Taken from notebook 1:
+
+| strata        | gamma_shape | gamma_scale | vonmises_kappa | vonmises_mu |
+|---------------|-------------|-------------|----------------|-------------|
+| boreal alpine | 0.675       | 382         | 0.177          | 0           |
+| boreal coast  | 0.774       | 273         | 0.0262         | 0           |
+| boreal inland | 0.739       | 347         | 0.126          | 0           |
+| temperate     | 0.875       | 191         | 0.0723         | 0           |
+
+: Table with Movement Distribution Parameters per Strata
+
+```{r}
+filter_pattern = c("Step", "Log", "angle")
+
+p1 <- plot_harmonics(harmonics_control, "Control Model", filter_pattern = filter_pattern)
+p2 <- plot_harmonics(harmonics_heatwave, "Heatwave Model", filter_pattern = filter_pattern)
+
+p_combined <- p1 + p2 + 
+  plot_annotation(
+    title = STRATA,
+    subtitle = "Selection for movement variables over time") + 
+  plot_layout(
+    ncol = 2, 
+    guides = 'collect', 
+    axis_titles = "collect_y") & 
+  theme(legend.position = 'bottom')
+
+p_combined <- apply_consistent_y_lims(p_combined) & 
+  ylab(expression(Time-varying~parameter~values~beta))
+
+print(p_combined)
+ggsave(glue('figures/{ANALYSIS_ID}_results_movement.jpg'))
+```

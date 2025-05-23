@@ -1,0 +1,18 @@
+---
+title: "index"
+editor: visual
+book:
+  title: "Moose Habitat Selection and Movement Dynamics in a Changing Thermal Landscape under Climate Change"
+  author: "Niels van der Vegt"
+  date: "24/04/2025"
+  chapters:
+    - index.qmd
+    - 01_step_generation.qmd
+    - 02_sample_geographic_covariates.qmd
+    - 03_sample_temperature_covariate.qmd
+    - S01_boreal_alpine.qmd
+    - S02_boreal_inland.qmd
+    - S03_boreal_coastal.qmd
+    - S04_temperate.qmd
+bibliography: references.bib
+---

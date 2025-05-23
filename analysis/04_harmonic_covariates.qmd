@@ -28,19 +28,19 @@ load('../data/localisations/moose_random_steps.RData')
 
 ```{r}
 moose_random_steps <- moose_random_steps %>% mutate(
-  hour_s1_t1 = sin(1*pi*hour_t1/24),
-  hour_s2_t1 = sin(3*pi*hour_t1/24),
-  hour_s3_t1 = sin(5*pi*hour_t1/24),
-  hour_c1_t1 = cos(1*pi*hour_t1/24),
-  hour_c2_t1 = cos(3*pi*hour_t1/24),
-  hour_c3_t1 = cos(5*pi*hour_t1/24),
+  hour_s1_t1 = sin(2*pi*hour_t1/24),
+  hour_s2_t1 = sin(4*pi*hour_t1/24),
+  hour_s3_t1 = sin(6*pi*hour_t1/24),
+  hour_c1_t1 = cos(2*pi*hour_t1/24),
+  hour_c2_t1 = cos(4*pi*hour_t1/24),
+  hour_c3_t1 = cos(6*pi*hour_t1/24),
   
-  hour_s1_t2 = sin(1*pi*hour_t2/24),
-  hour_s2_t2 = sin(3*pi*hour_t2/24),
-  hour_s3_t2 = sin(5*pi*hour_t2/24),
-  hour_c1_t2 = cos(1*pi*hour_t2/24),
-  hour_c2_t2 = cos(3*pi*hour_t2/24),
-  hour_c3_t2 = cos(5*pi*hour_t2/24),
+  hour_s1_t2 = sin(2*pi*hour_t2/24),
+  hour_s2_t2 = sin(4*pi*hour_t2/24),
+  hour_s3_t2 = sin(6*pi*hour_t2/24),
+  hour_c1_t2 = cos(2*pi*hour_t2/24),
+  hour_c2_t2 = cos(4*pi*hour_t2/24),
+  hour_c3_t2 = cos(6*pi*hour_t2/24),
 )
 ```
 

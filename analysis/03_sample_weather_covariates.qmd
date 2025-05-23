@@ -1,25 +1,32 @@
 ---
-title: "03.2"
-format: html
+title: "3 Sampling Temperature"
 editor: visual
 bibliography: ../references.bib
+format:
+  html:
+    toc: true
+    html-math-method: katex
 ---
 
-# Sampling Weather Covariates through Space-Time Regression Kriging
+# Sampling Temperature through Space-Time Regression Kriging
 
 ```{r}
 #| label: packages
 #| code-summary: "Loading packages"
 #| message: false
 #| warning: false
+#| output: false
 
 library(tidyverse)
-packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime", "data.table",
-              "bestNormalize"," ggplot2", "gganimate", "patchwork", "tictoc", "glue")
+packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime", "data.table", "caret",
+              "terra"," ggplot2", "gganimate", "patchwork", "tictoc", "glue")
 walk(packages, require, character.only = T)
 ```
 
 ```{r}
+#| label: set_env
+#| code-summary: "Set environmental variables"
+
 set.seed(20240703) 
 Sys.setenv(TZ='Europe/Stockholm')
 readRenviron("../.env")
@@ -34,6 +41,7 @@ load('../data/localisations/moose_random_steps.RData')
 We retrieve weather stations and their data from an SMHI mock database created for this project. For details how to set up this database, view the `smhi/README.md` document. Make sure to insert credentials into the `.env` file at the repository root.
 
 ```{r}
+#| label: connect to database
 con <- DBI::dbConnect(
   RPostgres::Postgres(), 
   dbname = Sys.getenv("DB_NAME"),
@@ -217,13 +225,17 @@ rm(pred_steps_start, pred_steps_end)
 
 ## 3. Spatial Temporal Regression Kriging
 
+```{r}
+load('../data/regression_model.RData')
+```
+
 ### 3.1 Making a test data set
 
 Kriging using a data set of millions or rows would take a really long time. Therefore we split our data into week batches when predicting temperature at localisations. Here we'll walk through the process.
 
 ```{r}
-start_date <- as.POSIXct("2005-07-17 21:00:00", tz="Europe/Stockholm")
-end_date <- as.POSIXct("2005-07-25 03:00:00", tz="Europe/Stockholm")
+start_date <- as.POSIXct("2018-06-01 08:00:00", tz="Europe/Stockholm")
+end_date <- as.POSIXct("2018-06-08 00:00:00", tz="Europe/Stockholm")
 weather_data <- get_weather_data(start_date, end_date, "air_temperature")
 weather_data <- as.data.frame(weather_data)
 ```
@@ -235,15 +247,42 @@ We'll transform our data into a `STDF` (Space-Time Data-Frame) from the package 
 ```{r}
 weather_data$year <- factor(weather_data$year, levels=regression_model$xlevels$year)
 weather_data$gtt <- temp_geom(weather_data$day, weather_data$lat, variable="mean")
-weather_data$res <- weather_data$value - unname(predict(regression_model, weather_data))
+weather_data$pred <- unname(predict(regression_model, weather_data))
+weather_data$res <- weather_data$value - weather_data$pred
 ```
+
+A further step we could take is removing stations that are considered too close to each other. We can find the nearest station to each other station using `st_nearest_feature`. For every station that is \<100m from another, we'll remove one of the stations.
+
+```{r}
+stations <- weather_data %>% distinct(station_id, x, y)
+stations_sp <- st_as_sf(stations, coords=c('x', 'y'), crs=st_crs(3006))
+nearest <- st_nearest_feature(stations_sp)
+nearest_df <- data.frame(
+  nearest_station_id = nearest,  
+  distance = as.vector(st_distance(stations_sp, stations_sp[nearest,], by_element=TRUE))
+) %>% arrange(distance)
+
+head(nearest_df)
+```
+
+We can see there's even two stations at exactly the same location, whilst we appreciate the enthusiasm this would make Kriging impossible. So instead we remove some of these stations that lie close together.
+
+```{r}
+nearest_df <- nearest_df %>% filter(distance < 100)
+nearest_df <- nearest_df[duplicated(nearest_df$distance),]  # Keep one of the stations
+stations_to_remove <- stations[nearest_df$nearest_station_id,]
+
+head(stations_to_remove)
+
+weather_data <- weather_data %>% filter(!(station_id %in% stations_to_remove$station_id))
+```
+
+We use the meteo2STFDF package to automatically enter NA for moments where stations lack a measurement For example, some stations only take measurements every 3 hours, whilst some do so every hour. This ensures that the `space-time` package sees our data as ordered, even though the intervals between stations may be different. `space-time` also supports Kriging with unordered data, but it is incredibly slow. Instead, now the NA's will instead simply be ignored by kriging. The biggest challenge is making sure variogram still fits reasonably well, and making sure there's still plenty of data even when not all stations are taking measurements.
 
 ```{r}
 stations <- weather_data %>% distinct(station_id, x, y)
 obs <- weather_data %>% select(station_id, date, value, elevation, gtt, res)
-```
 
-```{r}
 weather_stfdf <- meteo::meteo2STFDF(
   obs,
   stations,
@@ -253,36 +292,7 @@ weather_stfdf <- meteo::meteo2STFDF(
 )
 ```
 
-There are two weather stations in Sweden that share the exact location! Whilst we appreciate the enthusiasm this will severely break our modelling, let's remove one.
-
-```{r}
-zd <- zerodist(weather_stfdf@sp)
-print(zd)
-weather_stfdf <- weather_stfdf[-zd[,2], ]
-```
-
-A further step we could take is removing stations that are considered too close to each other. We can find the nearest station to each other station using `st_nearest_feature`. For every station that is \<100m from another, we'll remove one of the stations.
-
-```{r}
-weather_sp <- st_as_sf(weather_stfdf@sp)
-nearest <- st_nearest_feature(weather_sp)
-nearest_df <- data.frame(
-  nearest_station_id = nearest,  
-  distance = as.vector(st_distance(weather_sp, weather_sp[nearest,], by_element=TRUE))
-) %>% arrange(distance)
-
-head(nearest_df)
-```
-
-```{r}
-nearest_df <- nearest_df %>% filter(distance < 100)
-nearest_df <- nearest_df[duplicated(nearest_df$distance),]  # Keep one of the stations
-nearest_df <- nearest_df[-nearest_df$nearest_station_id,]  # Remove the other
-```
-
 ## 3.2 Fitting the semi-variogram
-
-![Example of the parameters of a semivariogram](images/clipboard-1631625815.png){fig-align="center" width="350"}
 
 First we fit the empirical variogram, what happens under the hood is a binning of data points based on spatial and temporal difference. The squared difference in their values is then averaged over those bins, giving us the variance over spatial and temporal distance.
 
@@ -294,6 +304,7 @@ max(tlags)
 ```
 
 ```{r}
+#| output: false
 emperical_variogram <- variogramST(res~1, weather_stfdf, tlags=tlags)
 ```
 
@@ -310,9 +321,9 @@ Next we attempt to fit a sum-metric space-time variogram to the empirical variog
 linear_st_anisotropy <- estiStAni(emperical_variogram, c(100000,400000), t.range=10)
 
 sum_metric_model <- vgmST("sumMetric",
-                          space=vgm(psill=6, "Sph", range=550000, nugget=1),
-                          time= vgm(psill=30, "Sph", range=10, nugget=1), 
-                          joint= vgm(psill=4, "Sph",  range=50000, nugget=1),
+                          space=vgm(psill=6, "Sph", range=550000, nugget=0),
+                          time= vgm(psill=30, "Sph", range=10, nugget=0), 
+                          joint= vgm(psill=4, "Sph",  range=50000, nugget=0),
                           stAni=linear_st_anisotropy)
 
 fit_sum_metric_model <- fit.StVariogram(
@@ -321,7 +332,7 @@ fit_sum_metric_model <- fit.StVariogram(
   lower = c(0,
             0.001,
             0,
-            0.01,  # Nugget
+            0.001,  # Nugget
             1), # Range
   fit.method = 8
 )
@@ -342,17 +353,276 @@ plot(emperical_variogram, fit_sum_metric_model, wireframe=T, all=T, scales=list(
 
 ### 3.3 Predicting & Cross validation
 
-TODO
+```{r}
+#| output: false
+#| message: false
+# This file contains a function called build_weather_kriging_model which automatically
+# fits a variogram model using the settings in 3.2 given some weather data. There's nothing
+# new here, just the code from 3.2 written into subfunctions.
+source('./03_parallel.R')
+```
 
-### 3.4 Visual inspection of results through prediction maps
+```{r}
+# Assuming your dataframe is called `df`
+folds <- createFolds(rownames(weather_data), k = 5, list = TRUE)
+# Initialize an empty list to store results
+cv_results <- list()
+```
 
-TODO
+```{r}
+head(folds$Fold1, 5)
+head(folds$Fold2, 5)
+```
+
+```{r}
+#| output: false
+#| message: false
+
+# Loop through each fold
+for(i in 1:length(folds)) {
+  
+  # Create training and testing datasets
+  train_indices <- unlist(folds[-i]) # use all except the current fold
+  test_indices <- folds[[i]]        # the current fold for testing
+  
+  # Prepare the train set and model
+  train_data <- weather_data[train_indices, ]
+  kriging_model <- build_weather_kriging_model(train_data)
+  
+  # Prepare the test set
+  test_data <- weather_data[test_indices, ]
+  test_sf <- st_as_sf(test_data, coords = c("x", "y"), crs = CRS('epsg:3006'))
+  spatial_points <- as(test_sf, "Spatial")
+  test_stfdf <- stConstruct(
+    test_data, 
+    space = c("x", "y"), 
+    time  = "date", 
+    spatial_points,
+    crs = CRS('epsg:3006')
+  )
+  
+  # Kriging model for training
+  tic()
+  kriging_object <- krigeST(
+    res~1, 
+    kriging_model$weather_stfdf, 
+    test_stfdf,
+    kriging_model$variogram_model, 
+    computeVar = T,
+    maxdist = 200000,
+    nmax = 10
+  )
+  toc()
+  
+  kriging_results <- kriging_object@data
+  pred_combined <- kriging_results$var1.pred + kriging_results$pred
+  
+  # Store the results
+  cv_results[[i]] <- data.frame(
+    fold = i,
+    true = kriging_results$value,
+    pred = pred_combined,
+    pred_res = kriging_results$res,
+    pred_var = kriging_results$var1.var
+  )
+}
+```
+
+```{r}
+# Combine the results into a single data frame
+cv_results_df <- do.call(rbind, cv_results)
+summary(cv_results_df)
+```
+
+```{r}
+# Calculate R², MAE, and RMSE over all folds
+cv_results_df <- cv_results_df %>%
+  mutate(
+    residuals = true - pred,
+    squared_residuals = residuals^2,
+    absolute_residuals = abs(residuals),
+    total_variance = (true - mean(true))^2
+  )
+
+# Compute overall metrics (across all folds)
+overall_metrics <- cv_results_df %>%
+  summarise(
+    mae = mean(absolute_residuals, na.rm = TRUE),
+    rmse = sqrt(mean(squared_residuals, na.rm = TRUE)),
+    r2 = 1 - sum(squared_residuals, na.rm = TRUE) / sum(total_variance, na.rm = TRUE)
+  )
+
+# Calculate 95% CI for all folds' predictions
+ci_all_folds <- cv_results_df %>%
+  summarise(
+    pred_mean = mean(pred, na.rm = TRUE),
+    lower = pred_mean - 1.96 * sd(pred, na.rm = TRUE),  # 95% CI lower bound
+    upper = pred_mean + 1.96 * sd(pred, na.rm = TRUE),  # 95% CI upper bound
+    .groups = "drop"
+  )
+```
+
+```{r}
+# --- Plot 1: Scatter of predicted vs true values with R², MAE, RMSE in the title ---
+p1 <- ggplot(cv_results_df, aes(x = pred, y = true, color = as.factor(fold))) +
+  geom_point(alpha = 0.4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    x = "Predicted Values (°C)",  # Updated axis label
+    y = "True Values (°C)",      # Updated axis label
+    color = "Fold",
+    title = "Predicted vs True (All Folds)",
+    subtitle = paste(
+      "R² = ", round(overall_metrics$r2, 2), " ",
+      "MAE = ", round(overall_metrics$mae, 2), " ",
+      "RMSE = ", round(overall_metrics$rmse, 2)
+    )
+  ) +
+  scale_color_viridis_d(option = "magma", begin = 0.3) +  # Add magma color scale
+  theme_minimal()
+
+p1
+ggsave('./figures/kriging_cv.jpg')
+```
+
+### 3.4 Visual inspection of results - animation over Sweden
+
+Lets make a prediction over a time series for all of Sweden. We'll split Sweden up into a grid with a cell size of 25km. Then for each cell we'll predict the temperate at a specific time. Lastly we'll animate the values to see how temperature changes over time. First lets create the grid.
+
+```{r, echo=F}
+#| echo: false
+source('03_parallel.R')
+```
+
+```{r}
+#| output: false
+#| message: false
+
+# Load Sweden border polygon
+sweden_border <- st_read("../data/strata/sweden_border.gpkg")
+sweden_border <- st_transform(sweden_border, 3006)
+
+# Create a regular grid within the Sweden border
+grid_res <- 8000  # Grid resolution (adjust as needed)
+sweden_grid <- st_make_grid(sweden_border, cellsize = grid_res)
+sweden_grid <- st_intersection(sweden_grid, sweden_border)  # Keep points inside Sweden
+
+# Convert to SpatialPointsDataFrame
+sweden_grid <- terra::vect(sweden_grid)
+
+# Load elevation raster
+elevation_rast <- terra::rast("../data/geographical_covariates/elevation.tif")
+elevation_at_cells <- terra::extract(elevation_rast, sweden_grid, fun=median, na.rm=T)
+sweden_grid$elevation <- elevation_at_cells$elevation
+
+# Extract coordinates
+sweden_grid$x <- crds(centroids(sweden_grid))[,1]
+sweden_grid$y <- crds(centroids(sweden_grid))[,2]
+
+sweden_grid <- terra::project(sweden_grid, "epsg:4326")
+sweden_grid$lat <- crds(centroids(sweden_grid))[,2]
+sweden_grid$cell_id <- 1:nrow(sweden_grid)
+```
+
+Next, lets make sure these cells exists for every hour we want to Krige temperature for. You can of course make this how fine or course you want to (keeping in mind the limitations of the original data), but here we stick to one hour. For each cell-time combination we'll also calculate the covariates and the prediction of the linear regression model which are used to get the final temperate.
+
+```{r}
+sweden_df <- as.data.frame(sweden_grid)
+
+# Define start and end times
+end_date <- start_date + hours(16)
+hourly_seq <- seq(start_date, end_date, by = "1 hour")
+n_hours <- length(hourly_seq)
+
+# Create a new data frame that combines the grid with hourly timestamps
+sweden_rep <- sweden_df[rep(seq_len(nrow(sweden_df)), each = n_hours), ]
+sweden_rep$t <- rep(hourly_seq, times = nrow(sweden_df))
+
+# Add temporal and spatial covariates
+sweden_rep$year <- factor(year(sweden_rep$t), levels = regression_model$xlevels$year)
+sweden_rep$gtt <- temp_geom(yday(sweden_rep$t), sweden_rep$lat, variable = "mean")
+
+# Predict residuals using the regression model
+sweden_rep$res <- predict(regression_model, newdata = sweden_rep)
+
+# Now sweden_grid_long is a data.frame with hourly predictions per grid cell
+head(sweden_rep)
+```
+
+Lets now Krige all these cells, i'm using the original weather data as retrieved in 2.2, but you could grab a smaller or larger set of weather data here too. Please note that we're Kriging quite a lot of cells, so expect this to take a while.
+
+```{r}
+#| output: false
+#| message: false
+
+spatial_points <- st_as_sf(sweden_rep, coords=c('x', 'y'), crs=st_crs(3006))
+spatial_points <- as(spatial_points, "Spatial")
+
+# Prepare the prediction grid as a spatial-temporal object
+prediction_grid_stfdf <- stConstruct(
+  sweden_rep, 
+  space = c("x", "y"), 
+  time = 't',  # Example prediction date
+  spatial_points,
+  crs = CRS('epsg:3006')
+)
+```
+
+```{r}
+#| output: false
+#| message: false
+
+# Prepare training data using all weather stations
+kriging_model <- build_weather_kriging_model(weather_data)
+
+# Perform kriging
+tic()
+kriging_object <- krigeST(
+  res~1, 
+  kriging_model$weather_stfdf, 
+  prediction_grid_stfdf,
+  kriging_model$variogram_model, 
+  maxdist=200000,
+  nmax=10, 
+  computeVar = T
+)
+toc()
+```
+
+Finally, lets go over our results by turning them into an animation showing how temperature changes over Sweden during our time period.
+
+```{r}
+# Convert predictions to a spatial format for visualization
+kriging_results <- as.data.frame(kriging_object)
+kriging_results$pred_temp <- kriging_results$res + kriging_results$var1.pred
+kriging_results_sf <- st_as_sf(kriging_results, coords=c('x', 'y'), crs=st_crs(3006))
+
+# Create the animated plot
+p <- ggplot(kriging_results_sf) +
+  geom_sf(aes(color = pred_temp, group = cell_id)) +
+  scale_color_viridis_c(name = "Temperature (°C)", option = "magma") +
+  labs(
+    title = "Predicted Temperature Over Sweden",
+    subtitle = "Time: {frame_time}",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal() +
+  transition_time(time) +
+  enter_fade() +
+  exit_fade()
+
+# Render animation
+gganimate::animate(p, renderer = gifski_renderer(), duration = 12, fps = 24)
+```
 
 ## 4 Sampling weather covariates at moose steps
 
-Next we can predict some moose steps. As we'll be doing this on large scale with multi-threading, some helper functions have been written. The `03_functions.r` file contains functions that combine all of the essentials that have been carried out so far. It also contains a small helper function to get us started with moose steps. We can either predict the temperature at the start step or the end step, here we'll show an example with end steps.
+Next we can predict some moose steps. As we'll be doing this on large scale with multi-threading, some helper functions have been written. The `03_functions.r` file contains functions that combine all of the essentials that have been carried out so far. It also contains a small helper function to get us started with moose steps. We can either predict the temperature at the start step or the end step, here we'll show an example with end steps.he prediction of the kriging. Remember that we initially applied a power transform, so we make sure to revert that.
 
 ```{r}
+#| output: false
+#| message: false
+
 prepare_end_steps <- function(df) {
   df <- df %>%
     mutate(
@@ -400,8 +670,6 @@ kriging_object <- krigeST(
 toc()
 ```
 
-Next lets transform our prediction into a temperature estimate. We do this by combining the prediction of the linear model, to the prediction of the kriging. Remember that we initially applied a power transform, so we make sure to revert that.
-
 ```{r}
 pred_kriging <- kriging_object@data$var1.pred
 pred_combined <- pred_kriging + localisations$res_end
@@ -416,15 +684,12 @@ print("Collar Temperature Summary")
 summary(localisations$collar_temperature)
 ```
 
-### 4.1. Using Parallelisation
+### 4.1. Using parallelisation
 
 Below is a separate piece of code that can be used to annotate all the steps in our `moose_random_steps` object with temperature data. The run-time of this will be rather significant, so take care not to run it accidentally.
 
-```{r}
-#| label: packages
-#| code-summary: "Loading packages"
-#| message: false
-#| warning: false
+```{r, eval = FALSE}
+#| eval: false
 
 library(tidyverse)
 packages <- c("sp", "sf", "gstat", "dbplyr", "meteo", "spacetime")
@@ -435,12 +700,16 @@ Sys.setenv(TZ='Europe/Stockholm')
 readRenviron("../.env")
 ```
 
-```{r}
+```{r, eval = FALSE}
+#| eval: false
+#| 
 load('../data/localisations/moose_random_steps.RData')
 load('../data/regression_model.RData')
 ```
 
-```{r}
+```{r, eval = FALSE}
+#| eval: false
+#| 
 # Compute the maximum number of moose data rows per batch.
 max_batch_size <- 10000
 
@@ -501,13 +770,17 @@ for (batch in all_batches){
 save(all_batches, file = '../data/all_batches.RData')
 ```
 
-```{r}
+```{r, eval = FALSE}
+#| eval: false
+
 kriging_results <- fread('../data/kriging/03_results.csv')
 moose_random_steps <- moose_random_steps %>% left_join(data, by=c("id"))
 save(moose_random_steps, file='../data/localisations/moose_random_steps.RData')
 ```
 
-```{r}
+```{r, eval = FALSE}
+#| eval: false
+#| 
 filenames = list.files(path='../result/', pattern = '\\.csv', full.names = TRUE)
 temp <- lapply(filenames, fread, sep=";")
 data <- rbindlist( temp )
