@@ -492,11 +492,6 @@ ggsave('./figures/03_kriging_cv.jpg')
 
 Lets make a prediction over a time series for all of Sweden. We'll split Sweden up into a grid with a cell size of 25km. Then for each cell we'll predict the temperate at a specific time. Lastly we'll animate the values to see how temperature changes over time. First lets create the grid.
 
-```{r, echo=F}
-#| echo: false
-source('03_parallel.R')
-```
-
 ```{r}
 #| output: false
 #| message: false
@@ -506,7 +501,7 @@ sweden_border <- st_read("../data/strata/sweden_border.gpkg")
 sweden_border <- st_transform(sweden_border, 3006)
 
 # Create a regular grid within the Sweden border
-grid_res <- 8000  # Grid resolution (adjust as needed)
+grid_res <- 20000  # Grid resolution (adjust as needed)
 sweden_grid <- st_make_grid(sweden_border, cellsize = grid_res)
 sweden_grid <- st_intersection(sweden_grid, sweden_border)  # Keep points inside Sweden
 
@@ -585,7 +580,7 @@ kriging_object <- krigeST(
   kriging_model$weather_stfdf, 
   prediction_grid_stfdf,
   kriging_model$variogram_model, 
-  maxdist=200000,
+  maxdist=100000,
   nmax=10, 
   computeVar = T
 )
@@ -691,6 +686,11 @@ summary(localisations$collar_temperature)
 
 Below is a separate piece of code that can be used to annotate all the steps in our `moose_random_steps` object with temperature data. The run-time of this will be rather significant, so take care not to run it accidentally.
 
+```{r, echo=F}
+#| echo: false
+source('03_parallel.R')
+```
+
 ```{r, eval = FALSE}
 #| eval: false
 
@@ -711,6 +711,7 @@ load('../data/regression_model.RData')
 ```
 
 ```{r, eval = FALSE}
+#| label: batching
 #| eval: false
 
 # Compute the maximum number of moose data rows per batch.
@@ -774,7 +775,7 @@ save(all_batches, file = '../data/all_batches.RData')
 ```
 
 ```{r, eval = FALSE}
-#| eval: false
+#| label: conbine
 
 kriging_results <- fread('../data/kriging/03_results.csv')
 moose_random_steps <- moose_random_steps %>% left_join(data, by=c("id"))
@@ -782,7 +783,7 @@ save(moose_random_steps, file='../data/localisations/moose_random_steps.RData')
 ```
 
 ```{r, eval = FALSE}
-#| eval: false
+#| label: conbine2
 
 filenames = list.files(path='../result/', pattern = '\\.csv', full.names = TRUE)
 temp <- lapply(filenames, fread, sep=";")

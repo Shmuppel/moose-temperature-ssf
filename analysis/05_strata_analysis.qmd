@@ -1,17 +1,17 @@
 ---
 title: "Strata Analysis"
 editor: visual
+bibliography: ../references.bib
 format:
   html:
     toc: true
     html-math-method: katex
 embed-resources: true
-bibliography: ../references.bib
 ---
 
 ```{r}
-STRATA <- "boreal inland"
-ANALYSIS_ID = "s2"
+STRATA <- "boreal coast"
+ANALYSIS_ID = "s3"
 ```
 
 ```{r, message=FALSE, warning=FALSE}
@@ -573,9 +573,9 @@ plot_heatwave_lines <- function(
                         round(heat_thresh, 1), "°C"),
       x = "Date",
       y = "Max Daily Temperature (°C)",
-      color = "Heatwave Year"
+      color = "Year"
     ) +
-    theme_minimal(base_size = 14) +
+    theme_minimal(base_size = 17) +
     theme(
       panel.grid.minor = element_blank(),
     )
@@ -862,19 +862,19 @@ compute_harmonics_scaled <- function(population_coefs) {
   hour <- seq(0, 23.9, 0.1)
   hour_harmonics_df_1p <- data.frame(
     linear_term = rep(1, length(hour)),
-    hour_c1_t2  = cos(2 * pi * hour / 24),
-    hour_c2_t2  = cos(4 * pi * hour / 24),
-    hour_s1_t2  = sin(2 * pi * hour / 24),
-    hour_s2_t2  = sin(4 * pi * hour / 24)
+    hour_c1_t2  = cos(3 * pi * hour / 24),
+    hour_c2_t2  = cos(6 * pi * hour / 24),
+    hour_s1_t2  = sin(3 * pi * hour / 24),
+    hour_s2_t2  = sin(6 * pi * hour / 24)
   )
   
   # Define the groups and how to filter the coefficient names.
    groups <- list(
     "Clear-cut & young forest" = list(filter_pattern = "landuse_endClear"),
-    #"Dedicious & mixed forest" = list(filter_pattern = "landuse_endDedicious"),
+    "Dedicious & mixed forest" = list(filter_pattern = "landuse_endDedicious"),
     "Coniferous forest" = list(filter_pattern = "landuse_endConiferous"),
     #"Open" = list(filter_pattern = "landuse_endOpen"),
-    "Wetland" = list(filter_pattern = "landuse_endWetland"),
+    #"Wetland" = list(filter_pattern = "landuse_endWetland"),
     
     "Elevation" = list(filter_pattern = "elevation"),
     "Distance to water" = list(filter_pattern = "water"),
@@ -966,20 +966,22 @@ plot_harmonics <- function(harmonics_scaled, title, filter_groups = NULL, filter
 
   # Convert to wide format for confidence intervals
   harmonics_wide <- harmonics_scaled %>%
-    pivot_wider(names_from = stat, values_from = value)  %>%
-    mutate(hour = hour+3)
+    pivot_wider(names_from = stat, values_from = value) 
 
   plot1 <- ggplot() +
     # Optional: uncomment if you use CI ribbons and keep group filtering consistent
     #geom_ribbon(data = harmonics_wide,
     #            aes(x = hour, ymax = upper, ymin = lower, fill = group),
     #            alpha = 0.2) +
-    geom_path(data = harmonics_wide %>% select(hour, group, mean),
+    geom_path(data = harmonics_wide %>% select(hour, group, mean), linewidth=1.2,
               aes(x = hour, y = mean, colour = group)) +
     geom_hline(yintercept = 0, linetype = "dashed") +
-    scale_x_continuous("Hour") +
-    theme_classic() +
-    theme(legend.position = "bottom") +
+    scale_x_continuous(
+        breaks = seq(0, 24, by = 4),
+        limits = c(0, 24),
+      ) +
+    theme_minimal(base_size = 16) +
+    theme(legend.position = "bottom", axis.title.x=element_blank()) +
     harmonic_legend_color + 
     ggtitle(title)
   
@@ -996,17 +998,13 @@ p1 <- plot_harmonics(harmonics_control, "Control Model", filter_pattern = filter
 p2 <- plot_harmonics(harmonics_heatwave, "Heatwave Model", filter_pattern = filter_pattern)
 
 p_combined <- p1 + p2 + 
-  plot_annotation(
-    title = toTitleCase(STRATA),
-    subtitle = glue('Reference Category: {reference_landuse_category}')) + 
   plot_layout(
     ncol = 2, 
-    guides = 'collect', 
     axis_titles = "collect_y") & 
   theme(legend.position = 'bottom')
 
 p_combined <- apply_consistent_y_lims(p_combined) & 
-  ylab(expression(Time-varying~parameter~values~beta))
+  ylab(expression(Time-varying~beta~values))
 
 print(p_combined)
 ggsave(glue('figures/{ANALYSIS_ID}_results_habitat_selection.jpg'))
@@ -1021,7 +1019,6 @@ p1 <- plot_harmonics(harmonics_control, "Control Model", filter_pattern = filter
 p2 <- plot_harmonics(harmonics_heatwave, "Heatwave Model", filter_pattern = filter_pattern)
 
 p_combined <- p1 + p2 + 
-  plot_annotation(title = toTitleCase(STRATA)) +
   plot_layout(
     ncol = 2, 
     guides = 'collect', 
@@ -1057,9 +1054,6 @@ p1 <- plot_harmonics(harmonics_control, "Control Model", filter_pattern = filter
 p2 <- plot_harmonics(harmonics_heatwave, "Heatwave Model", filter_pattern = filter_pattern)
 
 p_combined <- p1 + p2 + 
-  plot_annotation(
-    title = STRATA,
-    subtitle = "Selection for movement variables over time") + 
   plot_layout(
     ncol = 2, 
     guides = 'collect', 
